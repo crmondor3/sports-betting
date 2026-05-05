@@ -22,7 +22,7 @@ DEFAULT_KELLY_FRACTION: float = float(os.getenv("DEFAULT_KELLY_FRACTION", "0.25"
 EV_THRESHOLD: float = float(os.getenv("EV_THRESHOLD", "0.05"))
 MAX_KELLY: float = float(os.getenv("MAX_KELLY", "0.08"))
 MIN_CONFIDENCE: int = int(os.getenv("MIN_CONFIDENCE", "55"))  # 0-100
-MAX_PICKS_PER_DAY: int = int(os.getenv("MAX_PICKS_PER_DAY", "5"))
+MAX_PICKS_PER_DAY: int = int(os.getenv("MAX_PICKS_PER_DAY", "10"))
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///sports_betting.db")

@@ -289,7 +289,15 @@ def run_pipeline(
 
             analyzer = MatchupAnalyzer(elo_model=elo)
 
+            now_utc = datetime.now(timezone.utc)
             for game in games:
+                # Skip games that have already started
+                ct = game.commence_time
+                if ct.tzinfo is None:
+                    ct = ct.replace(tzinfo=timezone.utc)
+                if ct <= now_utc:
+                    logger.debug("Skipping started game: %s vs %s", game.home_team, game.away_team)
+                    continue
                 try:
                     picks = analyse_game(game, label, elo, poisson, espn, analyzer, bankroll)
                     all_picks.extend(picks)
