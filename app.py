@@ -6,7 +6,7 @@ Run: streamlit run app.py
 from __future__ import annotations
 
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -390,8 +390,8 @@ if page == "Smart Picks":
         payout_per_100 = round((_a2d_sp(p["dk_odds"]) - 1) * 100, 0)
 
         try:
-            game_dt = datetime.strptime(p["commence"], "%m/%d %H:%M").replace(year=datetime.now().year)
-            mins_left = int((game_dt - datetime.now()).total_seconds() / 60)
+            game_dt = datetime.fromisoformat(p["commence_time_iso"]).replace(tzinfo=timezone.utc)
+            mins_left = int((game_dt - datetime.now(timezone.utc)).total_seconds() / 60)
             if mins_left < 0:     time_badge_col, time_label = "#546e7a", "Started"
             elif mins_left < 60:  time_badge_col, time_label = "#ff5252", f"{mins_left}m to tip"
             elif mins_left < 180: time_badge_col, time_label = "#ffeb3b", f"{mins_left//60}h {mins_left%60}m to tip"
@@ -596,12 +596,10 @@ elif page == "Today's Picks":
         breakeven_american = decimal_to_american(breakeven_decimal)
         be_str = f"+{breakeven_american:.0f}" if breakeven_american >= 0 else f"{breakeven_american:.0f}"
 
-        # Time to game
+        # Time to game — commence_time_iso is UTC, compare to UTC now
         try:
-            game_dt = datetime.strptime(p["commence"], "%m/%d %H:%M").replace(
-                year=datetime.now().year)
-            now = datetime.now()
-            mins_left = int((game_dt - now).total_seconds() / 60)
+            game_dt = datetime.fromisoformat(p["commence_time_iso"]).replace(tzinfo=timezone.utc)
+            mins_left = int((game_dt - datetime.now(timezone.utc)).total_seconds() / 60)
             if mins_left < 0:
                 time_badge_col = "#546e7a"
                 time_label = "Started"

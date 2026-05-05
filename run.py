@@ -17,8 +17,11 @@ import argparse
 import logging
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +101,7 @@ class Pick:
 
     def to_dict(self) -> dict:
         edge_pct = round((self.model_prob - self.implied_prob) * 100, 1)
+        ct_et = self.commence_time.replace(tzinfo=timezone.utc).astimezone(_ET)
         return {
             "sport": self.sport,
             "game_id": self.game_id,
@@ -105,7 +109,7 @@ class Pick:
             "away_team": self.away_team,
             "commence_time_iso": self.commence_time.isoformat(),
             "game": self.game_label,
-            "commence": self.commence_time.strftime("%m/%d %H:%M"),
+            "commence": ct_et.strftime("%m/%d ") + ct_et.strftime("%I:%M %p ET").lstrip("0"),
             "bet_type": self.bet_type,
             "side": self.side,
             "bet_team": self.bet_team,
