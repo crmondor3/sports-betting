@@ -117,23 +117,11 @@ def _signal_html(signals: list[str]) -> str:
 def _init_state():
     defaults = {
         "sport":      "All",
-        "ev_min":     5.0,
+        "ev_min":     2.0,     # min EV% to show
+        "ev_min_odds": -250,   # exclude bigger favorites than this
+        "ev_max_odds":  400,   # exclude longshots beyond this
         "kelly":      0.25,
         "bankroll":   100.0,
-        "max_picks":  10,
-        "min_conf":   55,
-        # committed = what the last recalc used
-        "committed_sport":     "All",
-        "committed_ev_min":    5.0,
-        "committed_kelly":     0.25,
-        "committed_bankroll":  100.0,
-        "committed_max_picks": 10,
-        "committed_min_conf":  55,
-        # Smart Picks filters (instant-apply, no recalc needed)
-        "sp_min_odds":    -180,
-        "sp_max_odds":     300,
-        "sp_min_win_prob": 50,
-        "sp_max_picks":    10,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -145,29 +133,15 @@ _init_state()
 # ── Cached pipeline ────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _run_pipeline(sport_filter, ev_thresh, kelly_frac, bankroll, min_conf, max_picks_n):
+def _run_ev_pipeline(sport_filter, kelly_frac, bankroll):
+    """Fetch all +EV candidates (1% floor) — filtering/ranking done in the UI."""
     from run import run_pipeline
     import config as cfg
-    cfg.EV_THRESHOLD    = ev_thresh
-    cfg.DEFAULT_KELLY_FRACTION = kelly_frac
-    cfg.STARTING_BANKROLL      = bankroll
-    cfg.MIN_CONFIDENCE         = int(min_conf)
-    cfg.MAX_PICKS_PER_DAY      = int(max_picks_n)
-    picks, stats, api_rem = run_pipeline(sport_filter or None)
-    return [p.to_dict() for p in picks], picks, stats, api_rem
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _run_winners_pipeline(sport_filter, kelly_frac, bankroll):
-    """Low-threshold pipeline for Smart Picks — gets all +EV candidates so we
-    can rank and filter by win probability in the UI."""
-    from run import run_pipeline
-    import config as cfg
-    cfg.EV_THRESHOLD           = 0.01   # 1% — just needs to be positive
+    cfg.EV_THRESHOLD           = 0.01   # broad net; UI applies the real floor
     cfg.DEFAULT_KELLY_FRACTION = kelly_frac
     cfg.STARTING_BANKROLL      = bankroll
     cfg.MIN_CONFIDENCE         = 0
-    cfg.MAX_PICKS_PER_DAY      = 50
+    cfg.MAX_PICKS_PER_DAY      = 60
     picks, stats, api_rem = run_pipeline(sport_filter or None)
     return [p.to_dict() for p in picks], stats, api_rem
 
@@ -175,96 +149,50 @@ def _run_winners_pipeline(sport_filter, kelly_frac, bankroll):
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("## DK Model")
+    st.markdown("## DK Model  ·  EV Focus")
     st.caption(f"Today: {date.today().isoformat()}")
     st.divider()
 
     page = st.radio(
         "Page",
-        ["Smart Picks", "Today's Picks", "Bankroll", "Bet History", "Settle Bets"],
+        ["EV Picks", "Bankroll", "Bet History", "Settle Bets"],
         label_visibility="collapsed",
     )
 
     st.divider()
-    st.markdown("### Settings")
-    st.caption("Adjust below, then hit **Recalculate** to apply.")
+    st.markdown("### Filters")
+    st.caption("All filters apply instantly to the current data.")
 
-    sport_sel = st.selectbox(
+    st.session_state["sport"] = st.selectbox(
         "Sport", ["All", "NBA", "MLB", "NHL", "NFL"],
         index=["All","NBA","MLB","NHL","NFL"].index(st.session_state["sport"]),
     )
-    ev_min_input = st.slider(
+    st.session_state["ev_min"] = st.slider(
         "Min EV %", 1.0, 15.0,
         float(st.session_state["ev_min"]), 0.5, format="%.1f%%",
+        help="Only show picks where the model's edge exceeds this threshold.",
     )
-    kelly_input = st.slider(
+    st.session_state["ev_min_odds"] = st.slider(
+        "Exclude odds heavier than",
+        min_value=-350, max_value=-100,
+        value=int(st.session_state["ev_min_odds"]), step=10, format="%d",
+        help="e.g. -250 excludes -300, -400. Avoids massive favorites.",
+    )
+    st.session_state["ev_max_odds"] = st.slider(
+        "Exclude longshots above",
+        min_value=150, max_value=600,
+        value=int(st.session_state["ev_max_odds"]), step=25, format="+%d",
+    )
+    st.session_state["kelly"] = st.slider(
         "Kelly Fraction", 0.05, 1.0,
         float(st.session_state["kelly"]), 0.05, format="%.0f%%",
     )
-    bankroll_input = st.number_input(
+    st.session_state["bankroll"] = st.number_input(
         "Bankroll ($)", 10.0,
         value=float(st.session_state["bankroll"]), step=10.0,
     )
-    max_picks_input = st.slider(
-        "Max Picks", 1, 15,
-        int(st.session_state["max_picks"]),
-    )
-    min_conf_input = st.slider(
-        "Min Confidence", 0, 100,
-        int(st.session_state["min_conf"]),
-    )
 
     st.divider()
-
-    recalc = st.button("Recalculate", type="primary", use_container_width=True)
-    if recalc:
-        st.session_state["sport"]      = sport_sel
-        st.session_state["ev_min"]     = ev_min_input
-        st.session_state["kelly"]      = kelly_input
-        st.session_state["bankroll"]   = bankroll_input
-        st.session_state["max_picks"]  = max_picks_input
-        st.session_state["min_conf"]   = min_conf_input
-        # Commit to pipeline params
-        st.session_state["committed_sport"]     = sport_sel
-        st.session_state["committed_ev_min"]    = ev_min_input
-        st.session_state["committed_kelly"]     = kelly_input
-        st.session_state["committed_bankroll"]  = bankroll_input
-        st.session_state["committed_max_picks"] = max_picks_input
-        st.session_state["committed_min_conf"]  = min_conf_input
-        st.cache_data.clear()
-        st.rerun()
-
-    # Smart Picks filters (instant — no recalc button needed)
-    if page == "Smart Picks":
-        st.divider()
-        st.markdown("### Winner Filter")
-        st.caption("Applied instantly — no Recalculate needed.")
-        st.session_state["sp_min_odds"] = st.slider(
-            "Exclude odds heavier than",
-            min_value=-350, max_value=0,
-            value=st.session_state["sp_min_odds"], step=10,
-            format="%d",
-            help="e.g. -180 excludes -200, -250, etc. Avoids massive favorites.",
-        )
-        st.session_state["sp_max_odds"] = st.slider(
-            "Exclude longshots above",
-            min_value=100, max_value=500,
-            value=st.session_state["sp_max_odds"], step=25,
-            format="+%d",
-            help="Avoids low-probability bets with inflated payouts.",
-        )
-        st.session_state["sp_min_win_prob"] = st.slider(
-            "Min win probability",
-            min_value=40, max_value=75,
-            value=st.session_state["sp_min_win_prob"], step=1,
-            format="%d%%",
-        )
-        st.session_state["sp_max_picks"] = st.slider(
-            "Max picks shown", 1, 15,
-            value=st.session_state["sp_max_picks"],
-        )
-
-    # Cache status
     any_cached = any(is_cached(f"dk_odds_{v}") for v in config.SUPPORTED_SPORTS.values())
     if any_cached:
         st.success("Odds: cached today")
@@ -272,488 +200,283 @@ with st.sidebar:
         st.warning("Odds: not fetched yet")
 
     if st.button("Force Refresh Odds", use_container_width=True,
-                 help="Burns ~4 API requests. Use sparingly."):
+                 help="Burns ~4 API requests. Fetches fresh odds from DraftKings."):
         bust_all()
         st.cache_data.clear()
         st.rerun()
 
-    st.caption("Odds fetched once/day. ESPN stats cached daily.")
+    st.caption("Cache refreshes automatically at 7 AM ET daily.")
 
 
-# ── Read committed settings ────────────────────────────────────────────────────
-sport_arg    = None if st.session_state["committed_sport"] == "All" else st.session_state["committed_sport"]
-ev_min       = st.session_state["committed_ev_min"] / 100
-kelly        = st.session_state["committed_kelly"]
-bankroll_val = st.session_state["committed_bankroll"]
-max_picks    = st.session_state["committed_max_picks"]
-min_conf     = st.session_state["committed_min_conf"]
+# ── Active session values ──────────────────────────────────────────────────────
+sport_arg    = None if st.session_state["sport"] == "All" else st.session_state["sport"]
+kelly        = st.session_state["kelly"]
+bankroll_val = st.session_state["bankroll"]
+ev_min_filter = st.session_state["ev_min"]
+odds_lo       = st.session_state["ev_min_odds"]
+odds_hi       = st.session_state["ev_max_odds"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE: Smart Picks  (win-probability first, odds-filtered)
+# PAGE: EV Picks  — ranked by expected value, Active / Completed tabs
 # ══════════════════════════════════════════════════════════════════════════════
 
-if page == "Smart Picks":
-    st.title("Smart Picks")
-    sp_min_odds  = st.session_state["sp_min_odds"]
-    sp_max_odds  = st.session_state["sp_max_odds"]
-    sp_min_win   = st.session_state["sp_min_win_prob"] / 100
-    sp_max_picks = st.session_state["sp_max_picks"]
-
+if page == "EV Picks":
+    st.title("EV Picks")
     st.caption(
-        f"Ranked by win probability × confidence  ·  "
-        f"Odds {sp_min_odds:+d} to {sp_max_odds:+d}  ·  "
-        f"Min win prob {st.session_state['sp_min_win_prob']}%  ·  "
-        f"Kelly {kelly:.0%}  ·  Bankroll ${bankroll_val:,.0f}"
+        "Building bankroll through expected value — every pick shown has a mathematical edge "
+        "on DraftKings. Ranked by EV%, updated daily at 7 AM ET."
     )
 
-    with st.spinner("Running pipeline (odds cached daily)..."):
+    from models.kelly_criterion import kelly_fraction as _kf
+    from models.ev_calculator import american_to_decimal as _a2d, decimal_to_american as _d2a
+
+    with st.spinner("Fetching picks (odds cached daily)…"):
         try:
-            sp_dicts, sp_stats, sp_api_rem = _run_winners_pipeline(
-                sport_arg, kelly, bankroll_val
-            )
+            _all_dicts, _ev_stats, _api_rem = _run_ev_pipeline(sport_arg, kelly, bankroll_val)
         except Exception as exc:
             st.error(f"Pipeline error: {exc}")
             st.info("Check that ODDS_API_KEY is set in your Streamlit secrets or .env")
             st.stop()
 
-    if sp_dicts and "game_id" not in sp_dicts[0]:
+    if _all_dicts and "game_id" not in _all_dicts[0]:
         st.cache_data.clear()
         st.rerun()
 
-    # ── Filter by odds window + minimum win probability ────────────────────────
-    filtered = [
-        p for p in sp_dicts
-        if sp_min_odds <= p["dk_odds"] <= sp_max_odds
-        and p["model_prob"] >= sp_min_win
+    # ── Split: upcoming vs started ─────────────────────────────────────────────
+    _now = datetime.now(timezone.utc)
+
+    def _commence_dt(p: dict) -> datetime:
+        try:
+            return datetime.fromisoformat(p["commence_time_iso"]).replace(tzinfo=timezone.utc)
+        except Exception:
+            return datetime.max.replace(tzinfo=timezone.utc)
+
+    # Apply user filters then split by time
+    _qualifying = [
+        p for p in _all_dicts
+        if p["ev_pct"] >= ev_min_filter
+        and odds_lo <= p["dk_odds"] <= odds_hi
     ]
-
-    # Rank by win_score = model_prob × (confidence / 100)
-    filtered.sort(key=lambda p: p["model_prob"] * p["confidence"] / 100, reverse=True)
-    filtered = filtered[:sp_max_picks]
-
-    # ── KPIs ──────────────────────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Picks", len(filtered))
-    c2.metric("API Requests Left", sp_api_rem if sp_api_rem is not None else "cached")
-    if filtered:
-        avg_win  = sum(p["model_prob"] for p in filtered) / len(filtered)
-        avg_conf = sum(p["confidence"] for p in filtered) / len(filtered)
-        c3.metric("Avg Win Prob", f"{avg_win:.1%}")
-        c4.metric("Avg Confidence", f"{avg_conf:.0f}/100")
-
-    if not filtered:
-        st.warning(
-            "No picks match the current filter. "
-            "Try widening the odds range or lowering the min win probability."
-        )
-        st.info(
-            "The Smart Picks pipeline uses a 1% EV floor to surface candidates. "
-            "If still empty, check that today's odds have been fetched (sidebar)."
-        )
-        st.stop()
-
-    st.divider()
-    st.markdown("### Top Picks by Win Probability")
-    st.caption(
-        "Odds extremes filtered out — focused on bets the model believes in "
-        "at prices that are actually worth taking."
+    _upcoming   = sorted(
+        [p for p in _qualifying if _commence_dt(p) > _now],
+        key=lambda p: p["ev_pct"], reverse=True
+    )
+    _started    = sorted(
+        [p for p in _qualifying if _commence_dt(p) <= _now],
+        key=lambda p: _commence_dt(p)
     )
 
-    def _win_prob_color(prob: float) -> str:
-        if prob >= 0.63: return "#00e676"
-        if prob >= 0.54: return "#ffeb3b"
-        return "#90a4ae"
+    _top_10 = _upcoming[:10]
 
-    def _win_card_class(prob: float) -> str:
-        if prob >= 0.63: return "bet-card bet-card-high"
-        if prob >= 0.54: return "bet-card bet-card-med"
-        return "bet-card bet-card-low"
+    # ── KPI row ────────────────────────────────────────────────────────────────
+    _kc1, _kc2, _kc3, _kc4 = st.columns(4)
+    _kc1.metric("Active Picks", f"{len(_top_10)} / 10")
+    _kc2.metric("Completed Today", len(_started))
+    _kc3.metric(
+        "Avg EV",
+        f"{sum(p['ev_pct'] for p in _top_10)/len(_top_10):.1f}%" if _top_10 else "—",
+    )
+    _kc4.metric("API Requests Left", _api_rem if _api_rem is not None else "cached")
 
-    from models.kelly_criterion import kelly_fraction as _kf_sp
-    from models.ev_calculator import american_to_decimal as _a2d_sp
+    _tab_active, _tab_done = st.tabs(
+        [f"Active ({len(_top_10)})", f"Completed Today ({len(_started)})"]
+    )
 
-    for i, p in enumerate(filtered, 1):
-        prob      = p["model_prob"]
-        conf      = p["confidence"]
-        prob_col  = _win_prob_color(prob)
-        card_cls  = _win_card_class(prob)
-        odds_str  = f"+{p['dk_odds']:.0f}" if p["dk_odds"] >= 0 else f"{p['dk_odds']:.0f}"
-        edge_pct  = p.get("edge_pct", round((prob - p["implied_prob"]) * 100, 1))
-        bet_team  = p.get("bet_team", p["side"])
-        bet_lbl   = p["bet_type"].replace("total_", "").replace("_", " ").title()
-        side_disp = p["side"].upper() + (f" {p['line']:+g}" if p["line"] else "")
-        signals_html = _signal_html(p.get("signals", []))
+    # ═══════ ACTIVE TAB ════════════════════════════════════════════════════════
+    with _tab_active:
+        if not _top_10:
+            st.warning(
+                "No qualifying EV picks for upcoming games right now. "
+                "Try lowering Min EV% or widening the odds range in the sidebar."
+            )
+            st.info(
+                "New games are added daily — check back after 7 AM ET for the next batch."
+            )
+        else:
+            if len(_upcoming) < 10:
+                st.info(
+                    f"Found {len(_upcoming)} qualifying bet(s) today — "
+                    f"{10 - len(_upcoming)} short of the target 10. "
+                    "Lower Min EV% to surface more candidates."
+                )
 
-        live_frac  = _kf_sp(prob, p["dk_odds"], kelly)
-        live_stake = round(bankroll_val * live_frac, 2)
-        payout_per_100 = round((_a2d_sp(p["dk_odds"]) - 1) * 100, 0)
+            for _i, _p in enumerate(_top_10, 1):
+                _ev      = _p["ev_pct"]
+                _prob    = _p["model_prob"]
+                _conf    = _p["confidence"]
+                _ev_col  = _ev_color(_ev)
+                _odds_s  = f"+{_p['dk_odds']:.0f}" if _p["dk_odds"] >= 0 else f"{_p['dk_odds']:.0f}"
+                _edge    = _p.get("edge_pct", round((_prob - _p["implied_prob"]) * 100, 1))
+                _bteam   = _p.get("bet_team", _p["side"])
+                _blbl    = _p["bet_type"].replace("total_", "").replace("_", " ").title()
+                _sdisp   = _p["side"].upper() + (f" {_p['line']:+g}" if _p["line"] else "")
+                _sigs    = _signal_html(_p.get("signals", []))
+                _frac    = _kf(_prob, _p["dk_odds"], kelly)
+                _stake   = round(bankroll_val * _frac, 2)
+                _payout  = round((_a2d(_p["dk_odds"]) - 1) * 100, 0)
+                _be_dec  = 1 / _prob
+                _be_amer = _d2a(_be_dec)
+                _be_s    = f"+{_be_amer:.0f}" if _be_amer >= 0 else f"{_be_amer:.0f}"
 
-        try:
-            game_dt = datetime.fromisoformat(p["commence_time_iso"]).replace(tzinfo=timezone.utc)
-            mins_left = int((game_dt - datetime.now(timezone.utc)).total_seconds() / 60)
-            if mins_left < 0:     time_badge_col, time_label = "#546e7a", "Started"
-            elif mins_left < 60:  time_badge_col, time_label = "#ff5252", f"{mins_left}m to tip"
-            elif mins_left < 180: time_badge_col, time_label = "#ffeb3b", f"{mins_left//60}h {mins_left%60}m to tip"
-            else:                 time_badge_col, time_label = "#00e676", f"{mins_left//60}h to tip"
-        except Exception:
-            time_badge_col, time_label = "#546e7a", p["commence"]
+                _gdt    = _commence_dt(_p)
+                _mins   = int((_gdt - _now).total_seconds() / 60)
+                if _mins < 60:   _tbcol, _tlbl = "#ff5252", f"{_mins}m to tip"
+                elif _mins < 180:_tbcol, _tlbl = "#ffeb3b", f"{_mins//60}h {_mins%60}m to tip"
+                else:            _tbcol, _tlbl = "#00e676", f"{_mins//60}h to tip"
 
-        st.markdown(f"""
-<div class="{card_cls}">
+                _card_cls = ("bet-card bet-card-high" if _ev >= 8
+                             else "bet-card bet-card-med" if _ev >= 5
+                             else "bet-card bet-card-low")
 
-  <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
-    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-      <span style="background:#1e3a5f; color:#90caf9; border-radius:50%; width:28px; height:28px;
-                   display:inline-flex; align-items:center; justify-content:center;
-                   font-weight:800; font-size:0.9rem; flex-shrink:0;">#{i}</span>
-      <span class="tag tag-sport">{p['sport']}</span>
-      <span class="tag tag-type">{bet_lbl}</span>
-      <span style="font-size:1.2rem; font-weight:800; color:#ffffff; margin-left:6px;">{p['game']}</span>
+                st.markdown(f"""
+<div class="{_card_cls}">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span style="background:#1e3a5f;color:#90caf9;border-radius:50%;width:28px;height:28px;
+                   display:inline-flex;align-items:center;justify-content:center;
+                   font-weight:800;font-size:0.9rem;flex-shrink:0;">#{_i}</span>
+      <span class="tag tag-sport">{_p['sport']}</span>
+      <span class="tag tag-type">{_blbl}</span>
+      <span style="font-size:1.2rem;font-weight:800;color:#ffffff;margin-left:6px;">{_p['game']}</span>
     </div>
-    <div style="display:flex; gap:10px; align-items:center;">
-      <span style="background:{time_badge_col}22; color:{time_badge_col}; border:1px solid {time_badge_col};
-                   padding:2px 10px; border-radius:20px; font-size:0.8rem; font-weight:600;">
-        {time_label}
-      </span>
-      <span style="font-size:1.8rem; font-weight:900; color:{prob_col};">{prob:.0%} WIN</span>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <span style="background:{_tbcol}22;color:{_tbcol};border:1px solid {_tbcol};
+                   padding:2px 10px;border-radius:20px;font-size:0.8rem;font-weight:600;">{_tlbl}</span>
+      <span style="font-size:2rem;font-weight:900;color:{_ev_col};">{_ev:+.1f}% EV</span>
     </div>
   </div>
 
-  <div style="margin-top:10px; padding:8px 12px; background:#0d1520;
-              border-radius:6px; font-size:0.9rem; color:#cfd8dc;">
-    Betting <b style="color:#fff;">{bet_team}</b> ({bet_lbl} {side_disp} <b style="color:{prob_col};">{odds_str}</b>).
-    Model: <b style="color:{prob_col};">{prob:.1%}</b> win chance vs book's {p['implied_prob']:.1%}.
-    Edge: <b style="color:{prob_col};">+{edge_pct:.1f}%</b>
+  <div style="margin-top:10px;padding:8px 12px;background:#0d1520;border-radius:6px;font-size:0.9rem;color:#cfd8dc;">
+    Betting <b style="color:#fff;">{_bteam}</b> ({_blbl} {_sdisp} @ <b style="color:{_ev_col};">{_odds_s}</b>).
+    Model: <b style="color:{_ev_col};">{_prob:.1%}</b> win vs book's {_p['implied_prob']:.1%} implied.
+    Edge: <b style="color:{_ev_col};">+{_edge:.1f}%</b>
   </div>
 
-  <div style="margin-top:14px; display:flex; gap:28px; flex-wrap:wrap;">
+  <div style="margin-top:14px;display:flex;gap:28px;flex-wrap:wrap;">
     <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Bet</div>
-      <div style="font-size:1.25rem; font-weight:800; color:#ffffff;">{bet_team}</div>
-      <div style="font-size:0.85rem; color:#b0bec5;">{bet_lbl} &nbsp;{side_disp}</div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Bet</div>
+      <div style="font-size:1.25rem;font-weight:800;color:#ffffff;">{_bteam}</div>
+      <div style="font-size:0.85rem;color:#b0bec5;">{_blbl} &nbsp;{_sdisp}</div>
     </div>
     <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Odds</div>
-      <div style="font-size:1.4rem; font-weight:800; color:#ffffff;">{odds_str}</div>
-      <div style="font-size:0.8rem; color:#b0bec5;">+${payout_per_100:.0f} per $100</div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">EV</div>
+      <div style="font-size:1.6rem;font-weight:900;color:{_ev_col};">{_ev:+.1f}%</div>
+      <div style="font-size:0.8rem;color:#b0bec5;">expected value</div>
     </div>
     <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Win Prob</div>
-      <div style="font-size:1.4rem; font-weight:800; color:{prob_col};">{prob:.1%}</div>
-      <div style="font-size:0.85rem; color:#b0bec5;">book: {p['implied_prob']:.1%}</div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Odds</div>
+      <div style="font-size:1.4rem;font-weight:800;color:#ffffff;">{_odds_s}</div>
+      <div style="font-size:0.8rem;color:#b0bec5;">+${_payout:.0f} per $100</div>
     </div>
     <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Stake (Kelly)</div>
-      <div style="font-size:1.25rem; font-weight:800; color:#ffffff;">${live_stake:.2f}</div>
-      <div style="font-size:0.85rem; color:#b0bec5;">{live_frac:.1%} of ${bankroll_val:,.0f}</div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Model vs Book</div>
+      <div style="font-size:1.15rem;font-weight:700;color:{_ev_col};">{_prob:.1%}</div>
+      <div style="font-size:0.85rem;color:#b0bec5;">implied: {_p['implied_prob']:.1%}</div>
     </div>
     <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Confidence</div>
-      <div style="font-size:1.25rem; font-weight:800; color:{_conf_color(conf)};">
-        {conf}/100 <span style="font-size:0.8rem; color:#b0bec5;">({_conf_label(conf)})</span>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Stake (Kelly)</div>
+      <div style="font-size:1.25rem;font-weight:800;color:#ffffff;">${_stake:.2f}</div>
+      <div style="font-size:0.85rem;color:#b0bec5;">{_frac:.1%} of ${bankroll_val:,.0f}</div>
+    </div>
+    <div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Bet-To Line</div>
+      <div style="font-size:1.15rem;font-weight:700;color:#ff5252;">{_be_s}</div>
+      <div style="font-size:0.8rem;color:#b0bec5;">no edge below this</div>
+    </div>
+    <div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Confidence</div>
+      <div style="font-size:1.15rem;font-weight:700;color:{_conf_color(_conf)};">
+        {_conf}/100 <span style="font-size:0.8rem;color:#b0bec5;">({_conf_label(_conf)})</span>
       </div>
-      <div style="font-size:0.8rem; color:#b0bec5;">{p.get('data_quality','cold')} data</div>
-    </div>
-    <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">EV</div>
-      <div style="font-size:1.25rem; font-weight:800; color:{_ev_color(p['ev_pct'])};">{p['ev_pct']:+.1f}%</div>
-      <div style="font-size:0.8rem; color:#b0bec5;">expected value</div>
     </div>
   </div>
 
-  <div style="margin-top:14px; border-top:1px solid #1e2e42; padding-top:10px;
-              font-size:0.85rem; line-height:1.9; color:#b0bec5;">
-    <span style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1px; color:#546e7a;">
-      Signals for {bet_team}</span><br>
-    {signals_html if signals_html else '<span style="color:#546e7a;">No signal data — cold-start model</span>'}
+  <div style="margin-top:14px;border-top:1px solid #1e2e42;padding-top:10px;
+              font-size:0.85rem;line-height:1.9;color:#b0bec5;">
+    <span style="font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;color:#546e7a;">
+      Signals for {_bteam}</span><br>
+    {_sigs if _sigs else '<span style="color:#546e7a;">No signal data — cold-start model</span>'}
   </div>
-
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Log bet ───────────────────────────────────────────────────────────────
-    st.divider()
-    with st.expander("Log a bet to tracker"):
-        from models.kelly_criterion import kelly_fraction as kf
-        from bets.edge_detector import EdgeBet
+        # ── Log bet ────────────────────────────────────────────────────────────
+        if _top_10:
+            st.divider()
+            with st.expander("Log a bet to tracker"):
+                from bets.edge_detector import EdgeBet
+                _log_labels = [
+                    f"#{_i}  {_d['game']}  —  "
+                    f"{_d['bet_type'].replace('total_','').title()} {_d['side'].upper()}"
+                    + (f" {_d['line']:+g}" if _d['line'] else "")
+                    + f"  ({'+' if _d['dk_odds']>=0 else ''}{int(_d['dk_odds'])})"
+                    for _i, _d in enumerate(_top_10, 1)
+                ]
+                _log_idx = st.selectbox(
+                    "Pick to log", range(len(_top_10)),
+                    format_func=lambda x: _log_labels[x], key="ev_log_sel"
+                )
+                _sel = _top_10[_log_idx]
+                _lc1, _lc2 = st.columns(2)
+                _log_odds  = _lc1.number_input(
+                    "Odds placed at (American)", value=int(_sel["dk_odds"]),
+                    step=1, key="ev_odds_input"
+                )
+                _log_frac  = _kf(_sel["model_prob"], float(_log_odds), kelly)
+                _log_stake = _lc2.number_input(
+                    "Stake ($)", value=round(bankroll_val * _log_frac, 2),
+                    min_value=0.01, step=0.50, key="ev_stake_input"
+                )
+                _log_tracker = BankrollTracker(starting_bankroll=bankroll_val)
+                if st.button("Log Bet", type="primary", key="ev_log_btn"):
+                    _eb = EdgeBet(
+                        sport=_sel["sport"], game_id=_sel["game_id"],
+                        home_team=_sel["home_team"], away_team=_sel["away_team"],
+                        commence_time=datetime.fromisoformat(_sel["commence_time_iso"]),
+                        bet_type=_sel["bet_type"], side=_sel["side"], line=_sel["line"],
+                        best_book="draftkings", best_odds=float(_log_odds),
+                        model_prob=_sel["model_prob"], implied_prob=_sel["implied_prob"],
+                        ev_pct=_sel["ev_pct"], kelly_frac=_log_frac,
+                        recommended_stake=_log_stake, is_sharp_book=False,
+                    )
+                    _bid = _log_tracker.log_bet(_eb, bankroll=bankroll_val)
+                    _os  = f"+{int(_log_odds)}" if _log_odds >= 0 else str(int(_log_odds))
+                    st.success(f"Logged Bet #{_bid} — {_sel['bet_team']} {_os} · Stake ${_log_stake:.2f}")
+                    st.rerun()
 
-        sp_labels = [
-            f"#{i}  {d['game']}  —  "
-            f"{d['bet_type'].replace('total_','').title()} {d['side'].upper()}"
-            + (f" {d['line']:+g}" if d['line'] else "")
-            + f"  ({'+' if d['dk_odds']>=0 else ''}{int(d['dk_odds'])})"
-            for i, d in enumerate(filtered, 1)
-        ]
-        sp_idx = st.selectbox("Pick to log", range(len(filtered)),
-                              format_func=lambda x: sp_labels[x], key="sp_log_sel")
-        sel = filtered[sp_idx]
-
-        c1, c2 = st.columns(2)
-        actual_odds  = c1.number_input("Odds placed at (American)", value=int(sel["dk_odds"]),
-                                       step=1, key="sp_odds_input")
-        sp_frac      = kf(sel["model_prob"], float(actual_odds), kelly)
-        default_stk  = round(bankroll_val * sp_frac, 2)
-        actual_stake = c2.number_input("Stake ($)", value=float(default_stk),
-                                       min_value=0.01, step=0.50, key="sp_stake_input")
-
-        tracker = BankrollTracker(starting_bankroll=bankroll_val)
-        if st.button("Log Bet", type="primary", key="sp_log_btn"):
-            eb = EdgeBet(
-                sport=sel["sport"], game_id=sel["game_id"],
-                home_team=sel["home_team"], away_team=sel["away_team"],
-                commence_time=datetime.fromisoformat(sel["commence_time_iso"]),
-                bet_type=sel["bet_type"], side=sel["side"], line=sel["line"],
-                best_book="draftkings", best_odds=float(actual_odds),
-                model_prob=sel["model_prob"], implied_prob=sel["implied_prob"],
-                ev_pct=sel["ev_pct"], kelly_frac=sp_frac,
-                recommended_stake=actual_stake, is_sharp_book=False,
-            )
-            bid = tracker.log_bet(eb, bankroll=bankroll_val)
-            ods = f"+{int(actual_odds)}" if actual_odds >= 0 else str(int(actual_odds))
-            st.success(f"Logged Bet #{bid} — {sel['bet_team']} {ods} · Stake ${actual_stake:.2f}")
-            st.rerun()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PAGE: Today's Picks
-# ══════════════════════════════════════════════════════════════════════════════
-
-elif page == "Today's Picks":
-    st.title("Today's Top Picks")
-    st.caption(
-        f"DraftKings only  ·  Min EV {ev_min:.0%}  ·  "
-        f"Min Confidence {min_conf}  ·  Max {max_picks} picks  ·  "
-        f"Kelly {kelly:.0%}  ·  Bankroll ${bankroll_val:,.0f}"
-    )
-
-    with st.spinner("Running pipeline (odds fetched once today)..."):
-        try:
-            dicts, picks_obj, stats, api_rem = _run_pipeline(
-                sport_arg, ev_min, kelly, bankroll_val, min_conf, max_picks
-            )
-        except Exception as exc:
-            st.error(f"Pipeline error: {exc}")
-            st.info("Check that ODDS_API_KEY is set in .env")
-            st.stop()
-
-    # If cached dicts are missing game_id (old format), clear cache and rerun
-    if dicts and "game_id" not in dicts[0]:
-        st.cache_data.clear()
-        st.rerun()
-
-    # Apply max_picks override
-    dicts = dicts[:max_picks]
-
-    # ── Top-line KPIs ─────────────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Picks Today", len(dicts))
-    c2.metric("API Requests Left", api_rem if api_rem is not None else "cached")
-    tracker = BankrollTracker(starting_bankroll=bankroll_val)
-    br_stats = tracker.get_stats()
-    c3.metric("Bankroll (Kelly)", f"${br_stats.get('current_bankroll_kelly', bankroll_val):,.2f}")
-    c4.metric("Hit Rate", br_stats.get("hit_rate", "—"))
-
-    if not dicts:
-        st.warning(
-            f"No picks meet the criteria (EV ≥ {ev_min:.0%}, confidence ≥ {config.MIN_CONFIDENCE}).\n\n"
-            "Try lowering the EV slider, or check back after today's games are posted."
-        )
-        st.stop()
-
-    st.divider()
-
-    # ── Bet cards ─────────────────────────────────────────────────────────────
-    st.markdown("### Recommended Picks")
-    st.caption("Ranked by EV × Confidence — only bets where the model and matchup data agree.")
-
-    for i, p in enumerate(dicts, 1):
-        conf = p["confidence"]
-        ev = p["ev_pct"]
-        card_class = _card_class(conf)
-        conf_col = _conf_color(conf)
-        ev_col = _ev_color(ev)
-
-        bet_team = p.get("bet_team", p["side"])
-        side_display = p["side"].upper()
-        if p["line"] is not None:
-            side_display += f" {p['line']:+g}"
-
-        bet_type_label = p["bet_type"].replace("total_", "").replace("_", " ").title()
-        odds_str = f"+{p['dk_odds']:.0f}" if p['dk_odds'] >= 0 else f"{p['dk_odds']:.0f}"
-        edge_pct = p.get("edge_pct", round((p["model_prob"] - p["implied_prob"]) * 100, 1))
-        signals_html = _signal_html(p.get("signals", []))
-
-        # Live stake from current bankroll
-        from models.kelly_criterion import kelly_fraction
-        from models.ev_calculator import decimal_to_american, american_to_decimal
-        live_kelly_frac = kelly_fraction(p["model_prob"], p["dk_odds"], kelly)
-        live_stake = round(bankroll_val * live_kelly_frac, 2)
-
-        # ── Bet-to line: the worst odds at which this bet stays +EV ──────────
-        # EV = 0 when decimal odds = 1 / model_prob
-        breakeven_decimal = 1 / p["model_prob"]
-        breakeven_american = decimal_to_american(breakeven_decimal)
-        be_str = f"+{breakeven_american:.0f}" if breakeven_american >= 0 else f"{breakeven_american:.0f}"
-
-        # Time to game — commence_time_iso is UTC, compare to UTC now
-        try:
-            game_dt = datetime.fromisoformat(p["commence_time_iso"]).replace(tzinfo=timezone.utc)
-            mins_left = int((game_dt - datetime.now(timezone.utc)).total_seconds() / 60)
-            if mins_left < 0:
-                time_badge_col = "#546e7a"
-                time_label = "Started"
-            elif mins_left < 60:
-                time_badge_col = "#ff5252"
-                time_label = f"{mins_left}m to tip"
-            elif mins_left < 180:
-                time_badge_col = "#ffeb3b"
-                time_label = f"{mins_left // 60}h {mins_left % 60}m to tip"
-            else:
-                time_badge_col = "#00e676"
-                time_label = f"{mins_left // 60}h to tip"
-        except Exception:
-            time_badge_col = "#546e7a"
-            time_label = p["commence"]
-
-        # Explain WHY
-        why_html = (
-            f"Betting <b style='color:#ffffff;'>{bet_team}</b> ({bet_type_label}). "
-            f"Model gives them <b style='color:{ev_col};'>{p['model_prob']:.1%}</b> — "
-            f"DraftKings prices them at <b>{p['implied_prob']:.1%}</b>. "
-            f"Edge: <b style='color:{ev_col};'>+{edge_pct:.1f}%</b>"
-        )
-
-        st.markdown(f"""
-<div class="{card_class}">
-
-  <!-- Header row -->
-  <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
-    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-      <span style="background:#1e3a5f; color:#90caf9; border-radius:50%; width:28px; height:28px;
-                   display:inline-flex; align-items:center; justify-content:center;
-                   font-weight:800; font-size:0.9rem; flex-shrink:0;">#{i}</span>
-      <span class="tag tag-sport">{p['sport']}</span>
-      <span class="tag tag-type">{bet_type_label}</span>
-      <span style="font-size:1.2rem; font-weight:800; color:#ffffff; margin-left:6px;">
-        {p['game']}
-      </span>
+    # ═══════ COMPLETED TODAY TAB ════════════════════════════════════════════════
+    with _tab_done:
+        if not _started:
+            st.info("No completed games from today's picks yet.")
+        else:
+            st.caption("These games have started — settle results in the **Settle Bets** tab.")
+            for _p in _started:
+                _ev      = _p["ev_pct"]
+                _ev_col  = _ev_color(_ev)
+                _bteam   = _p.get("bet_team", _p["side"])
+                _blbl    = _p["bet_type"].replace("total_", "").replace("_", " ").title()
+                _sdisp   = _p["side"].upper() + (f" {_p['line']:+g}" if _p["line"] else "")
+                _odds_s  = f"+{_p['dk_odds']:.0f}" if _p["dk_odds"] >= 0 else f"{_p['dk_odds']:.0f}"
+                st.markdown(f"""
+<div class="bet-card" style="opacity:0.75;">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span class="tag tag-sport">{_p['sport']}</span>
+      <span class="tag tag-type">{_blbl}</span>
+      <span style="font-size:1.1rem;font-weight:700;color:#cfd8dc;">{_p['game']}</span>
     </div>
-    <div style="display:flex; gap:10px; align-items:center;">
-      <span style="background:{time_badge_col}22; color:{time_badge_col}; border:1px solid {time_badge_col};
-                   padding:2px 10px; border-radius:20px; font-size:0.8rem; font-weight:600;">
-        {time_label}
-      </span>
-      <span style="font-size:1.6rem; font-weight:800; color:{ev_col};">{ev:+.1f}% EV</span>
-    </div>
+    <span style="background:#546e7a33;color:#90a4ae;border:1px solid #546e7a;
+                 padding:2px 10px;border-radius:20px;font-size:0.8rem;">Started</span>
   </div>
-
-  <!-- Why box -->
-  <div style="margin-top:10px; padding:8px 12px; background:#0d1520;
-              border-radius:6px; font-size:0.9rem; color:#cfd8dc;">
-    {why_html}
+  <div style="margin-top:10px;font-size:0.9rem;color:#b0bec5;">
+    <b style="color:#fff;">{_bteam}</b> &nbsp;{_blbl} {_sdisp} &nbsp;
+    <b style="color:{_ev_col};">{_odds_s}</b> &nbsp;·&nbsp;
+    EV at post: <b style="color:{_ev_col};">{_ev:+.1f}%</b> &nbsp;·&nbsp;
+    Model: {_p['model_prob']:.1%}
   </div>
-
-  <!-- Stats row -->
-  <div style="margin-top:14px; display:flex; gap:28px; flex-wrap:wrap;">
-    <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Bet</div>
-      <div style="font-size:1.25rem; font-weight:800; color:#ffffff;">{bet_team}</div>
-      <div style="font-size:0.85rem; color:#b0bec5;">{bet_type_label} &nbsp;{side_display} &nbsp;
-        <span style="color:#ffffff; font-weight:700;">{odds_str}</span>
-      </div>
-    </div>
-    <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Model vs Book</div>
-      <div style="font-size:1.15rem; font-weight:700; color:{ev_col};">{p['model_prob']:.1%}</div>
-      <div style="font-size:0.85rem; color:#b0bec5;">book implied: {p['implied_prob']:.1%}</div>
-    </div>
-    <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Stake (Kelly)</div>
-      <div style="font-size:1.25rem; font-weight:800; color:#ffffff;">${live_stake:.2f}</div>
-      <div style="font-size:0.85rem; color:#b0bec5;">{live_kelly_frac:.1%} of ${bankroll_val:,.0f}</div>
-    </div>
-    <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Bet-To Line</div>
-      <div style="font-size:1.15rem; font-weight:700; color:#ff5252;">{be_str}</div>
-      <div style="font-size:0.8rem; color:#b0bec5;">no value below this</div>
-    </div>
-    <div>
-      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Confidence</div>
-      <div style="font-size:1.15rem; font-weight:700; color:{conf_col};">
-        {conf}/100 <span style="font-size:0.8rem; color:#b0bec5;">({_conf_label(conf)})</span>
-      </div>
-      <div style="font-size:0.8rem; color:#b0bec5;">{p.get('data_quality','cold')} data</div>
-    </div>
-  </div>
-
-  <!-- Signals -->
-  <div style="margin-top:14px; border-top:1px solid #1e2e42; padding-top:10px;
-              font-size:0.85rem; line-height:1.9; color:#b0bec5;">
-    <span style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1px; color:#546e7a;">
-      Signals for {bet_team}</span><br>
-    {signals_html if signals_html else '<span style="color:#546e7a;">No signal data — cold-start model</span>'}
-  </div>
-
 </div>
 """, unsafe_allow_html=True)
-
-    # ── Log bets ──────────────────────────────────────────────────────────────
-    st.divider()
-    with st.expander("Log a bet to tracker"):
-        from models.kelly_criterion import kelly_fraction as kf
-        from bets.edge_detector import EdgeBet
-
-        pick_labels = [
-            f"#{i}  {d['game']}  —  "
-            f"{d['bet_type'].replace('total_','').title()} {d['side'].upper()}"
-            + (f" {d['line']:+g}" if d['line'] else "")
-            + f"  ({'+' if d['dk_odds']>=0 else ''}{int(d['dk_odds'])})"
-            for i, d in enumerate(dicts, 1)
-        ]
-        pick_idx = st.selectbox("Pick to log", range(len(dicts)),
-                                format_func=lambda x: pick_labels[x])
-        sel = dicts[pick_idx]
-
-        c1, c2 = st.columns(2)
-        actual_odds = c1.number_input(
-            "Odds placed at (American)",
-            value=int(sel["dk_odds"]),
-            step=1,
-            help="Adjust if the line moved when you placed the bet",
-        )
-        live_frac   = kf(sel["model_prob"], float(actual_odds), kelly)
-        default_stake = round(bankroll_val * live_frac, 2)
-        actual_stake = c2.number_input(
-            "Stake ($)",
-            value=float(default_stake),
-            min_value=0.01,
-            step=0.50,
-            help="Override Kelly stake if desired",
-        )
-
-        if st.button("Log Bet", type="primary"):
-            eb = EdgeBet(
-                sport=sel["sport"],
-                game_id=sel["game_id"],
-                home_team=sel["home_team"],
-                away_team=sel["away_team"],
-                commence_time=datetime.fromisoformat(sel["commence_time_iso"]),
-                bet_type=sel["bet_type"],
-                side=sel["side"],
-                line=sel["line"],
-                best_book="draftkings",
-                best_odds=float(actual_odds),
-                model_prob=sel["model_prob"],
-                implied_prob=sel["implied_prob"],
-                ev_pct=sel["ev_pct"],
-                kelly_frac=live_frac,
-                recommended_stake=actual_stake,
-                is_sharp_book=False,
-            )
-            bid = tracker.log_bet(eb, bankroll=bankroll_val)
-            odds_str = f"+{int(actual_odds)}" if actual_odds >= 0 else str(int(actual_odds))
-            st.success(f"Logged Bet #{bid} — {sel['bet_team']} {odds_str} · Stake ${actual_stake:.2f}")
-            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -794,6 +517,59 @@ elif page == "Bankroll":
     from tracker.models import Bet
     with session_scope() as s:
         bets = s.query(Bet).filter(Bet.settled == True).order_by(Bet.settled_at).all()
+
+    # ── EV Profile ─────────────────────────────────────────────────────────────
+    st.subheader("EV Profile")
+    st.caption(
+        "Building bankroll through expected value — tracking how model edge converts to actual profit."
+    )
+
+    _theo_ev     = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in bets)
+    _actual_pnl  = sum(b.pnl_kelly or 0 for b in bets)
+    _efficiency  = (_actual_pnl / _theo_ev * 100) if _theo_ev > 0 else 0.0
+    _avg_ev      = sum(b.ev_pct or 0 for b in bets) / len(bets) if bets else 0.0
+    _total_staked = sum(b.stake_kelly or 0 for b in bets)
+    _pnl_vs_theo = _actual_pnl - _theo_ev
+
+    ep1, ep2, ep3, ep4 = st.columns(4)
+    ep1.metric(
+        "Theoretical EV Captured",
+        f"${_theo_ev:+.2f}",
+        help="Expected dollar profit based on EV% × stake at bet time across all settled bets.",
+    )
+    ep2.metric(
+        "Actual P&L",
+        f"${_actual_pnl:+.2f}",
+        delta=f"${_pnl_vs_theo:+.2f} vs theoretical",
+        delta_color="normal",
+    )
+    ep3.metric(
+        "EV Efficiency",
+        f"{_efficiency:.0f}%",
+        help="How much of the theoretical edge converted to real profit. >100% = running above expectation.",
+    )
+    ep4.metric(
+        "Avg EV / Bet",
+        f"{_avg_ev:+.1f}%",
+        help="Mean expected value across all settled bets. Target: consistently >3%.",
+    )
+
+    # Mini EV-efficiency bar
+    _eff_clamp = max(0.0, min(_efficiency, 200.0))
+    _eff_color = "#00e676" if _efficiency >= 80 else "#ffeb3b" if _efficiency >= 40 else "#ff5252"
+    st.markdown(f"""
+<div style="margin:8px 0 16px;background:#0d1520;border-radius:8px;overflow:hidden;height:10px;">
+  <div style="width:{_eff_clamp/2:.1f}%;height:10px;background:{_eff_color};
+              border-radius:8px;transition:width 0.4s;"></div>
+</div>
+<div style="display:flex;gap:24px;font-size:0.82rem;color:#78909c;margin-bottom:8px;">
+  <span>Total staked: <b style="color:#cfd8dc;">${_total_staked:,.2f}</b></span>
+  <span>Settled bets: <b style="color:#cfd8dc;">{len(bets)}</b></span>
+  <span>EV edge (theoretical): <b style="color:{_eff_color};">${_theo_ev:+.2f}</b></span>
+</div>
+""", unsafe_allow_html=True)
+
+    st.divider()
 
     # Running bankroll chart — starts at bankroll_val, each settled bet moves it
     running_k, running_f = bankroll_val, bankroll_val
