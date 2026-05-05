@@ -173,6 +173,15 @@ class BankrollTracker:
         logger.info("Exported %d bets to %s", len(bets), out)
         return out
 
+    def delete_bet(self, bet_id: int) -> None:
+        """Permanently remove a bet record."""
+        with session_scope() as s:
+            bet: Bet | None = s.get(Bet, bet_id)
+            if bet is None:
+                raise ValueError(f"Bet #{bet_id} not found")
+            s.delete(bet)
+        logger.info("Deleted bet #%d", bet_id)
+
     # ── Pending bets ───────────────────────────────────────────────────────────
 
     def get_open_bets(self) -> list[Bet]:

@@ -911,6 +911,24 @@ elif page == "Bet History":
     st.dataframe(filtered, use_container_width=True, hide_index=True)
     st.caption(f"{len(filtered)} of {len(rows)} bets")
 
+    st.divider()
+    with st.expander("Remove a bet"):
+        tracker_del = BankrollTracker(starting_bankroll=bankroll_val)
+        bet_options = {
+            f"#{r['ID']}  {r['Date']}  {r['Game']}  {r['Type']} {r['Side']}  {r['Odds']}  [{r['Result']}]": r["ID"]
+            for r in rows
+        }
+        if not bet_options:
+            st.info("No bets to remove.")
+        else:
+            sel_label = st.selectbox("Select bet to remove", list(bet_options.keys()), key="del_bet_sel")
+            sel_id = bet_options[sel_label]
+            confirmed = st.checkbox(f"I confirm I want to permanently delete Bet #{sel_id}", key="del_confirm")
+            if st.button("Delete Bet", type="primary", disabled=not confirmed, key="del_btn"):
+                tracker_del.delete_bet(sel_id)
+                st.success(f"Bet #{sel_id} deleted.")
+                st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: Settle Bets
@@ -944,3 +962,11 @@ elif page == "Settle Bets":
                                        closing_odds=closing or None)
                     st.success(f"Bet #{bet.id} settled as {result}")
                     st.rerun()
+
+            st.divider()
+            confirmed_del = st.checkbox("Confirm delete", key=f"del_open_{bet.id}")
+            if st.button("Delete Bet", key=f"del_open_btn_{bet.id}",
+                         disabled=not confirmed_del):
+                tracker.delete_bet(bet.id)
+                st.success(f"Bet #{bet.id} deleted.")
+                st.rerun()
