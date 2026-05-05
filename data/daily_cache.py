@@ -1,13 +1,14 @@
 """
 File-based daily cache.
-Data is fetched once per calendar day and stored as JSON in cache/.
-Subsequent runs reuse the cached data — zero extra API calls.
+Data is fetched once per cache slot and stored as JSON in cache/.
+The cache slot advances at 07:00 America/New_York each day — so a fresh fetch
+happens automatically every morning at 7 AM ET regardless of server timezone.
 """
 from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +17,27 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = Path(__file__).parent.parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
+_REFRESH_HOUR_ET = 7  # 07:00 America/New_York
+
+
+def _cache_slot() -> str:
+    """
+    Returns the active cache-slot date string (YYYY-MM-DD).
+    The slot flips forward at 07:00 ET — before that hour we still use the
+    previous day's slot so overnight data stays valid until morning.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    if now_et.hour >= _REFRESH_HOUR_ET:
+        return now_et.strftime("%Y-%m-%d")
+    return (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
+
 
 def _path(key: str, for_date: date | None = None) -> Path:
-    d = (for_date or date.today()).isoformat()
+    d = for_date.isoformat() if for_date else _cache_slot()
     return CACHE_DIR / f"{d}_{key}.json"
 
 
