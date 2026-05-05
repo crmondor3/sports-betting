@@ -48,6 +48,7 @@ class Bet(Base):
     clv = Column(Float, nullable=True)               # closing_line_value
     settled_at = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
+    auto_tracked = Column(Boolean, default=False, nullable=True)  # True = logged by model, False = manually placed
 
     def __repr__(self) -> str:
         return (

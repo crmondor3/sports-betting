@@ -146,6 +146,59 @@ def _run_ev_pipeline(sport_filter, kelly_frac, bankroll):
     return [p.to_dict() for p in picks], stats, api_rem
 
 
+def _auto_log_model_picks(picks: list[dict], bankroll: float, kelly_frac: float) -> int:
+    """
+    Idempotently persist all pipeline picks as auto-tracked model bets.
+    Skips any game_id+bet_type+side that's already in the DB (manual or auto).
+    Returns count of newly inserted rows.
+    """
+    from tracker.database import session_scope
+    from tracker.models import Bet as _BetModel
+    from models.kelly_criterion import kelly_fraction as _kf, flat_stake
+
+    with session_scope() as s:
+        existing = {
+            (r.game_id, r.bet_type, r.side)
+            for r in s.query(_BetModel.game_id, _BetModel.bet_type, _BetModel.side).all()
+        }
+        new_count = 0
+        for p in picks:
+            key = (p["game_id"], p["bet_type"], p["side"])
+            if key in existing:
+                continue
+            try:
+                frac  = _kf(p["model_prob"], p["dk_odds"], kelly_frac)
+                stake = round(bankroll * frac, 2)
+                ct    = datetime.fromisoformat(p["commence_time_iso"])
+                bet   = _BetModel(
+                    sport=p["sport"],
+                    game_id=p["game_id"],
+                    home_team=p["home_team"],
+                    away_team=p["away_team"],
+                    commence_time=ct,
+                    bet_type=p["bet_type"],
+                    side=p["side"],
+                    line=p["line"],
+                    bookmaker="draftkings",
+                    odds=float(p["dk_odds"]),
+                    model_prob=p["model_prob"],
+                    implied_prob=p["implied_prob"],
+                    ev_pct=p["ev_pct"],
+                    kelly_frac=frac,
+                    stake_kelly=stake,
+                    stake_flat=flat_stake(bankroll),
+                    bankroll_at_bet=bankroll,
+                    settled=False,
+                    auto_tracked=True,
+                )
+                s.add(bet)
+                existing.add(key)
+                new_count += 1
+            except Exception:
+                pass
+    return new_count
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -242,6 +295,15 @@ if page == "EV Picks":
     if _all_dicts and "game_id" not in _all_dicts[0]:
         st.cache_data.clear()
         st.rerun()
+
+    # ── Auto-log ALL pipeline picks as model-tracked bets (idempotent) ─────────
+    if "model_picks_logged" not in st.session_state:
+        _n_new = _auto_log_model_picks(_all_dicts, bankroll_val, kelly)
+        if _n_new > 0:
+            # Settle any completed games that were just logged
+            from tracker.auto_settle import auto_settle as _settle_new
+            _settle_new()
+        st.session_state["model_picks_logged"] = True
 
     # ── Split: upcoming vs started ─────────────────────────────────────────────
     _now = datetime.now(timezone.utc)
@@ -450,7 +512,29 @@ if page == "EV Picks":
         if not _started:
             st.info("No completed games from today's picks yet.")
         else:
-            st.caption("These games have started — settle results in the **Settle Bets** tab.")
+            # Look up W/L for each started pick from the DB
+            from tracker.database import session_scope as _ss
+            from tracker.models import Bet as _BM
+            _started_game_ids = list({p["game_id"] for p in _started})
+            with _ss() as _s:
+                _db_bets = {
+                    (b.game_id, b.bet_type, b.side): {
+                        "settled": b.settled, "won": b.won,
+                        "pnl": b.pnl_kelly, "id": b.id,
+                    }
+                    for b in _s.query(_BM).filter(_BM.game_id.in_(_started_game_ids)).all()
+                }
+
+            _n_won  = sum(1 for v in _db_bets.values() if v["settled"] and v["won"])
+            _n_lost = sum(1 for v in _db_bets.values() if v["settled"] and not v["won"])
+            _n_open = sum(1 for v in _db_bets.values() if not v["settled"])
+            if _n_won or _n_lost:
+                _rc1, _rc2, _rc3 = st.columns(3)
+                _rc1.metric("Wins", _n_won)
+                _rc2.metric("Losses", _n_lost)
+                _rc3.metric("Pending", _n_open)
+            st.caption("Games that have started. Results auto-settle ~4 hours after tip.")
+
             for _p in _started:
                 _ev      = _p["ev_pct"]
                 _ev_col  = _ev_color(_ev)
@@ -458,16 +542,45 @@ if page == "EV Picks":
                 _blbl    = _p["bet_type"].replace("total_", "").replace("_", " ").title()
                 _sdisp   = _p["side"].upper() + (f" {_p['line']:+g}" if _p["line"] else "")
                 _odds_s  = f"+{_p['dk_odds']:.0f}" if _p["dk_odds"] >= 0 else f"{_p['dk_odds']:.0f}"
+                _db_key  = (_p["game_id"], _p["bet_type"], _p["side"])
+                _db_rec  = _db_bets.get(_db_key)
+
+                if _db_rec and _db_rec["settled"]:
+                    _won = _db_rec["won"]
+                    _pnl = _db_rec["pnl"] or 0
+                    _result_badge = (
+                        f'<span style="background:#00e67622;color:#00e676;border:1px solid #00e676;'
+                        f'padding:2px 12px;border-radius:20px;font-size:0.85rem;font-weight:700;">WIN  +${_pnl:.2f}</span>'
+                        if _won else
+                        f'<span style="background:#ff525222;color:#ff5252;border:1px solid #ff5252;'
+                        f'padding:2px 12px;border-radius:20px;font-size:0.85rem;font-weight:700;">LOSS  -${abs(_pnl):.2f}</span>'
+                    )
+                elif _db_rec:
+                    _result_badge = (
+                        '<span style="background:#ffeb3b22;color:#ffeb3b;border:1px solid #ffeb3b;'
+                        'padding:2px 12px;border-radius:20px;font-size:0.8rem;">In Progress</span>'
+                    )
+                else:
+                    _result_badge = (
+                        '<span style="background:#546e7a33;color:#90a4ae;border:1px solid #546e7a;'
+                        'padding:2px 12px;border-radius:20px;font-size:0.8rem;">Started</span>'
+                    )
+
+                _card_bg = (
+                    "border-left:5px solid #00e676;" if (_db_rec and _db_rec["settled"] and _db_rec["won"])
+                    else "border-left:5px solid #ff5252;" if (_db_rec and _db_rec["settled"] and not _db_rec["won"])
+                    else ""
+                )
+
                 st.markdown(f"""
-<div class="bet-card" style="opacity:0.75;">
+<div class="bet-card" style="opacity:0.85;{_card_bg}">
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-    <div style="display:flex;align-items:center;gap:8px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
       <span class="tag tag-sport">{_p['sport']}</span>
       <span class="tag tag-type">{_blbl}</span>
       <span style="font-size:1.1rem;font-weight:700;color:#cfd8dc;">{_p['game']}</span>
     </div>
-    <span style="background:#546e7a33;color:#90a4ae;border:1px solid #546e7a;
-                 padding:2px 10px;border-radius:20px;font-size:0.8rem;">Started</span>
+    {_result_badge}
   </div>
   <div style="margin-top:10px;font-size:0.9rem;color:#b0bec5;">
     <b style="color:#fff;">{_bteam}</b> &nbsp;{_blbl} {_sdisp} &nbsp;
@@ -521,51 +634,69 @@ elif page == "Bankroll":
     # ── EV Profile ─────────────────────────────────────────────────────────────
     st.subheader("EV Profile")
     st.caption(
-        "Building bankroll through expected value — tracking how model edge converts to actual profit."
+        "Tracking every pick the model surfaces — win rate and edge efficiency across all tracked bets."
     )
 
-    _theo_ev     = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in bets)
-    _actual_pnl  = sum(b.pnl_kelly or 0 for b in bets)
-    _efficiency  = (_actual_pnl / _theo_ev * 100) if _theo_ev > 0 else 0.0
-    _avg_ev      = sum(b.ev_pct or 0 for b in bets) / len(bets) if bets else 0.0
-    _total_staked = sum(b.stake_kelly or 0 for b in bets)
-    _pnl_vs_theo = _actual_pnl - _theo_ev
+    _model_bets  = [b for b in bets if b.auto_tracked]
+    _placed_bets = [b for b in bets if not b.auto_tracked]
 
-    ep1, ep2, ep3, ep4 = st.columns(4)
-    ep1.metric(
-        "Theoretical EV Captured",
-        f"${_theo_ev:+.2f}",
-        help="Expected dollar profit based on EV% × stake at bet time across all settled bets.",
-    )
-    ep2.metric(
-        "Actual P&L",
-        f"${_actual_pnl:+.2f}",
-        delta=f"${_pnl_vs_theo:+.2f} vs theoretical",
-        delta_color="normal",
-    )
-    ep3.metric(
-        "EV Efficiency",
-        f"{_efficiency:.0f}%",
-        help="How much of the theoretical edge converted to real profit. >100% = running above expectation.",
-    )
-    ep4.metric(
-        "Avg EV / Bet",
-        f"{_avg_ev:+.1f}%",
-        help="Mean expected value across all settled bets. Target: consistently >3%.",
-    )
+    def _ev_stats(bet_list):
+        if not bet_list:
+            return dict(theo=0.0, pnl=0.0, eff=0.0, avg_ev=0.0, staked=0.0,
+                        wins=0, total=0, hit="—")
+        theo   = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in bet_list)
+        pnl    = sum(b.pnl_kelly or 0 for b in bet_list)
+        staked = sum(b.stake_kelly or 0 for b in bet_list)
+        wins   = sum(1 for b in bet_list if b.won)
+        return dict(
+            theo=theo, pnl=pnl,
+            eff=(pnl / theo * 100) if theo > 0 else 0.0,
+            avg_ev=sum(b.ev_pct or 0 for b in bet_list) / len(bet_list),
+            staked=staked, wins=wins, total=len(bet_list),
+            hit=f"{wins / len(bet_list):.1%}",
+        )
 
-    # Mini EV-efficiency bar
-    _eff_clamp = max(0.0, min(_efficiency, 200.0))
-    _eff_color = "#00e676" if _efficiency >= 80 else "#ffeb3b" if _efficiency >= 40 else "#ff5252"
+    _ms = _ev_stats(_model_bets)
+    _ps = _ev_stats(_placed_bets)
+
+    _ev_col_m = "#00e676" if _ms["eff"] >= 80 else "#ffeb3b" if _ms["eff"] >= 40 else "#ff5252"
+    _ev_col_p = "#00e676" if _ps["eff"] >= 80 else "#ffeb3b" if _ps["eff"] >= 40 else "#ff5252"
+
+    st.markdown("#### Model Picks (all auto-tracked)")
+    ep1, ep2, ep3, ep4, ep5 = st.columns(5)
+    ep1.metric("Settled", _ms["total"])
+    ep2.metric("Win Rate", _ms["hit"])
+    ep3.metric("Theoretical EV", f"${_ms['theo']:+.2f}",
+               help="EV% × Kelly stake at bet time.")
+    ep4.metric("Actual P&L", f"${_ms['pnl']:+.2f}",
+               delta=f"${_ms['pnl'] - _ms['theo']:+.2f} vs edge")
+    ep5.metric("EV Efficiency", f"{_ms['eff']:.0f}%",
+               help=">100% = running above model expectation.")
+
+    _mc = max(0.0, min(_ms["eff"], 200.0))
     st.markdown(f"""
-<div style="margin:8px 0 16px;background:#0d1520;border-radius:8px;overflow:hidden;height:10px;">
-  <div style="width:{_eff_clamp/2:.1f}%;height:10px;background:{_eff_color};
-              border-radius:8px;transition:width 0.4s;"></div>
+<div style="margin:6px 0 14px;background:#0d1520;border-radius:6px;overflow:hidden;height:8px;">
+  <div style="width:{_mc/2:.1f}%;height:8px;background:{_ev_col_m};border-radius:6px;"></div>
 </div>
-<div style="display:flex;gap:24px;font-size:0.82rem;color:#78909c;margin-bottom:8px;">
-  <span>Total staked: <b style="color:#cfd8dc;">${_total_staked:,.2f}</b></span>
-  <span>Settled bets: <b style="color:#cfd8dc;">{len(bets)}</b></span>
-  <span>EV edge (theoretical): <b style="color:{_eff_color};">${_theo_ev:+.2f}</b></span>
+<div style="font-size:0.8rem;color:#546e7a;margin-bottom:16px;">
+  {_ms['total']} settled picks · avg EV <b style="color:#cfd8dc;">{_ms['avg_ev']:+.1f}%</b>
+  · total staked <b style="color:#cfd8dc;">${_ms['staked']:,.2f}</b>
+</div>
+""", unsafe_allow_html=True)
+
+    if _placed_bets:
+        st.markdown("#### Manually Placed Bets")
+        fp1, fp2, fp3, fp4, fp5 = st.columns(5)
+        fp1.metric("Settled", _ps["total"])
+        fp2.metric("Win Rate", _ps["hit"])
+        fp3.metric("Theoretical EV", f"${_ps['theo']:+.2f}")
+        fp4.metric("Actual P&L", f"${_ps['pnl']:+.2f}",
+                   delta=f"${_ps['pnl'] - _ps['theo']:+.2f} vs edge")
+        fp5.metric("EV Efficiency", f"{_ps['eff']:.0f}%")
+        _pc = max(0.0, min(_ps["eff"], 200.0))
+        st.markdown(f"""
+<div style="margin:6px 0 14px;background:#0d1520;border-radius:6px;overflow:hidden;height:8px;">
+  <div style="width:{_pc/2:.1f}%;height:8px;background:{_ev_col_p};border-radius:6px;"></div>
 </div>
 """, unsafe_allow_html=True)
 

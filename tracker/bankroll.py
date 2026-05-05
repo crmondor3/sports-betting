@@ -29,7 +29,7 @@ class BankrollTracker:
 
     # ── Logging ────────────────────────────────────────────────────────────────
 
-    def log_bet(self, edge: EdgeBet, bankroll: float | None = None) -> int:
+    def log_bet(self, edge: EdgeBet, bankroll: float | None = None, auto_tracked: bool = False) -> int:
         """Persist an EdgeBet. Returns the new Bet.id."""
         bankroll = bankroll or self.get_current_bankroll()
         flat = flat_stake(bankroll)
@@ -53,6 +53,7 @@ class BankrollTracker:
                 stake_flat=flat,
                 bankroll_at_bet=bankroll,
                 settled=False,
+                auto_tracked=auto_tracked,
             )
             s.add(bet)
             s.flush()
