@@ -602,6 +602,100 @@ class TennisDataClient:
             "matched_name": matched,
         }
 
+    def get_player_from_db(self, player_name: str, tour: str) -> dict:
+        """
+        Look up aggregated stats for a player from the SQLite TennisPlayer table.
+        Returns the same structure as get_player_stats(), sourced from the DB.
+        """
+        import json as _json
+        from tracker.database import session_scope
+        from tracker.models import TennisPlayer
+
+        _empty: dict = {
+            "recent_matches": [],
+            "surface_record": {},
+            "day_record": {},
+            "first_set_stats": {
+                "won_first_set_win_pct": None,
+                "lost_first_set_win_pct": None,
+                "first_set_win_rate": None,
+            },
+            "overall": {
+                "wins": 0, "losses": 0,
+                "avg_serve_win_pct": None, "avg_return_win_pct": None,
+                "avg_first_serve_pct": None, "avg_aces": None, "avg_dfs": None,
+                "ranking": None,
+            },
+            "data_quality": "no_data",
+        }
+        tour_key = tour.lower()
+        try:
+            with session_scope() as s:
+                # Fast exact lookup first (uses unique index)
+                player = s.query(TennisPlayer).filter_by(
+                    name=player_name, tour=tour_key
+                ).first()
+
+                # Fuzzy fallback: load only names, then do a second lookup
+                if player is None:
+                    all_names = [
+                        row[0]
+                        for row in s.query(TennisPlayer.name).filter_by(tour=tour_key).all()
+                    ]
+                    matched = _fuzzy_match_name(player_name, all_names)
+                    if matched is None:
+                        return _empty
+                    player = s.query(TennisPlayer).filter_by(
+                        name=matched, tour=tour_key
+                    ).first()
+
+                if player is None:
+                    return _empty
+
+                surf_blob = _json.loads(player.surface_stats)   if player.surface_stats   else {}
+                day_blob  = _json.loads(player.day_stats)       if player.day_stats       else {}
+                fs_blob   = _json.loads(player.first_set_stats) if player.first_set_stats else {}
+
+                # Builder stores {spw, rpw}; convert to API format
+                surface_record = {
+                    surf: {
+                        "wins":           ss.get("wins", 0),
+                        "losses":         ss.get("losses", 0),
+                        "serve_win_pct":  ss.get("spw"),
+                        "return_win_pct": ss.get("rpw"),
+                    }
+                    for surf, ss in surf_blob.items()
+                }
+
+                total = (player.wins or 0) + (player.losses or 0)
+                dq = "full" if total >= 10 else ("partial" if total > 0 else "no_data")
+
+                return {
+                    "recent_matches": [],
+                    "surface_record": surface_record,
+                    "day_record":     day_blob,
+                    "first_set_stats": {
+                        "won_first_set_win_pct":  fs_blob.get("won_fs_win_pct"),
+                        "lost_first_set_win_pct": fs_blob.get("lost_fs_win_pct"),
+                        "first_set_win_rate":     fs_blob.get("fs_win_rate"),
+                    },
+                    "overall": {
+                        "wins":                player.wins   or 0,
+                        "losses":              player.losses or 0,
+                        "avg_serve_win_pct":   player.avg_serve_win_pct,
+                        "avg_return_win_pct":  player.avg_return_win_pct,
+                        "avg_first_serve_pct": player.avg_first_serve_pct,
+                        "avg_aces":            player.avg_aces,
+                        "avg_dfs":             player.avg_dfs,
+                        "ranking":             player.ranking,
+                    },
+                    "data_quality": dq,
+                    "matched_name": player.name,
+                }
+        except Exception as exc:
+            logger.warning("get_player_from_db failed for %s/%s: %s", player_name, tour, exc)
+            return _empty
+
     def close(self):
         self._http.close()
 
