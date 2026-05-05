@@ -181,7 +181,7 @@ with st.sidebar:
 
     page = st.radio(
         "Page",
-        ["Smart Picks", "Today's Picks", "Bankroll", "Bet History", "Settle Bets"],
+        ["Smart Picks", "Tennis", "Today's Picks", "Bankroll", "Bet History", "Settle Bets"],
         label_visibility="collapsed",
     )
 
@@ -513,6 +513,465 @@ if page == "Smart Picks":
             ods = f"+{int(actual_odds)}" if actual_odds >= 0 else str(int(actual_odds))
             st.success(f"Logged Bet #{bid} — {sel['bet_team']} {ods} · Stake ${actual_stake:.2f}")
             st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: Tennis
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Tennis":
+    st.title("Tennis Analysis")
+
+    from data.tennis_api import TennisDataClient, infer_surface, SURFACE_ADJ as _TENNIS_SURF_ADJ
+    from models.tennis_model import TennisModel
+
+    _tennis_client = TennisDataClient()
+
+    # Surface badge colours
+    _SURF_COLOR = {"grass": "#2e7d32", "clay": "#b71c1c", "hard": "#1565c0", "carpet": "#4a148c"}
+    _SURF_BG    = {"grass": "#1b3a1e", "clay": "#3a1010", "hard": "#0d2748", "carpet": "#1a0a2e"}
+
+    tab_matches, tab_kpi = st.tabs(["Today's Matches", "Player KPIs"])
+
+    # ── Shared data fetch ──────────────────────────────────────────────────────
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _fetch_tennis_matches(tours: list[str]) -> list[dict]:
+        client = TennisDataClient()
+        matches: list[dict] = []
+        for t in tours:
+            matches.extend(client.get_upcoming_matches(t))
+        return matches
+
+    @st.cache_data(ttl=86400, show_spinner=False)
+    def _fetch_tennis_df(tour: str):
+        client = TennisDataClient()
+        df = client.get_player_df(tour)
+        if df.empty:
+            return []
+        return df.to_dict(orient="records")
+
+    # ── Tab: Today's Matches ───────────────────────────────────────────────────
+    with tab_matches:
+        tour_sel = st.radio("Tour", ["ATP", "WTA", "Both"], horizontal=True, key="tennis_tour")
+        tours_to_fetch = (
+            ["atp", "wta"] if tour_sel == "Both"
+            else [tour_sel.lower()]
+        )
+
+        with st.spinner("Fetching matches and stats..."):
+            all_matches = _fetch_tennis_matches(tours_to_fetch)
+            atp_records = _fetch_tennis_df("atp")
+            wta_records = _fetch_tennis_df("wta")
+
+        atp_df = pd.DataFrame(atp_records) if atp_records else pd.DataFrame()
+        wta_df = pd.DataFrame(wta_records) if wta_records else pd.DataFrame()
+
+        if not all_matches:
+            st.warning(
+                "No matches found on the ESPN tennis scoreboard right now. "
+                "Check back when tournaments are in progress."
+            )
+        else:
+            st.caption(f"{len(all_matches)} match(es) found")
+
+            for match in all_matches:
+                p1 = match["player1_name"]
+                p2 = match["player2_name"]
+                tour_badge = match["tour"]
+                tournament  = match["tournament"] or "Unknown Tournament"
+                surface     = match["surface"]
+                round_name  = match["round_name"] or ""
+                is_done     = match["is_completed"]
+
+                # Pick correct DataFrame
+                df_for_match = atp_df if tour_badge == "ATP" else wta_df
+
+                # Get player stats (uncached — already cached inside client)
+                try:
+                    p1_stats = _tennis_client.get_player_stats(p1, df_for_match)
+                    p2_stats = _tennis_client.get_player_stats(p2, df_for_match)
+                except Exception:
+                    p1_stats = {"data_quality": "no_data", "overall": {}, "recent_matches": [],
+                                "surface_record": {}, "day_record": {}, "first_set_stats": {}}
+                    p2_stats = dict(p1_stats)
+
+                # Model prediction
+                try:
+                    pred = TennisModel.predict(p1_stats, p2_stats, surface, best_of=3)
+                    p1_prob = pred["p1_win_prob"]
+                    p2_prob = pred["p2_win_prob"]
+                    confidence = pred["model_confidence"]
+                    surf_favors = pred["surface_favors"]
+                except Exception:
+                    p1_prob, p2_prob, confidence, surf_favors = 0.5, 0.5, 0, "neutral"
+
+                surf_col = _SURF_COLOR.get(surface, "#546e7a")
+                surf_bg  = _SURF_BG.get(surface, "#1a2535")
+                status_badge = (
+                    '<span style="background:#546e7a33;color:#90a4ae;border:1px solid #546e7a;'
+                    'padding:2px 8px;border-radius:20px;font-size:0.75rem;">Completed</span>'
+                    if is_done else
+                    '<span style="background:#00e67622;color:#00e676;border:1px solid #00e676;'
+                    'padding:2px 8px;border-radius:20px;font-size:0.75rem;">Upcoming</span>'
+                )
+
+                surf_favors_note = ""
+                if surf_favors == "player1":
+                    surf_favors_note = f'<span style="color:#00e676;font-size:0.8rem;">Surface favors {p1}</span>'
+                elif surf_favors == "player2":
+                    surf_favors_note = f'<span style="color:#00e676;font-size:0.8rem;">Surface favors {p2}</span>'
+
+                conf_col = "#00e676" if confidence >= 60 else ("#ffeb3b" if confidence >= 35 else "#78909c")
+
+                st.markdown(f"""
+<div class="bet-card" style="border-left:5px solid {surf_col}; margin-bottom:20px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span style="background:{surf_col}22;color:{surf_col};border:1px solid {surf_col};
+                   padding:2px 10px;border-radius:20px;font-size:0.8rem;font-weight:700;">
+        {surface.upper()}
+      </span>
+      <span class="tag tag-sport">{tour_badge}</span>
+      {status_badge}
+      <span style="font-size:1rem;color:#b0bec5;">{tournament}</span>
+      {"<span style='color:#78909c;font-size:0.85rem;'>· " + round_name + "</span>" if round_name else ""}
+    </div>
+    <span style="color:{conf_col};font-size:0.8rem;font-weight:600;">
+      Model confidence: {confidence}%
+    </span>
+  </div>
+
+  <div style="margin-top:14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+    <div style="flex:1;min-width:120px;text-align:right;">
+      <div style="font-size:1.3rem;font-weight:800;color:#ffffff;">{p1}</div>
+      <div style="font-size:1.8rem;font-weight:900;color:#40c4ff;">{p1_prob:.0%}</div>
+    </div>
+    <div style="min-width:60px;text-align:center;">
+      <!-- Win probability bar -->
+      <div style="background:#1e2a3a;border-radius:6px;height:12px;overflow:hidden;width:160px;margin:0 auto;">
+        <div style="background:linear-gradient(90deg,#40c4ff {p1_prob*100:.0f}%,#ff6b6b {p1_prob*100:.0f}%);
+                    height:100%;border-radius:6px;"></div>
+      </div>
+      <div style="color:#78909c;font-size:0.75rem;margin-top:4px;">WIN PROBABILITY</div>
+      {surf_favors_note}
+    </div>
+    <div style="flex:1;min-width:120px;text-align:left;">
+      <div style="font-size:1.3rem;font-weight:800;color:#ffffff;">{p2}</div>
+      <div style="font-size:1.8rem;font-weight:900;color:#ff6b6b;">{p2_prob:.0%}</div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+                # Trend charts — serve and return last 10
+                rm1 = p1_stats.get("recent_matches", [])
+                rm2 = p2_stats.get("recent_matches", [])
+
+                has_serve_data = (
+                    any(r.get("serve_win_pct") is not None for r in rm1)
+                    or any(r.get("serve_win_pct") is not None for r in rm2)
+                )
+
+                if has_serve_data:
+                    col_chart1, col_chart2 = st.columns(2)
+
+                    def _make_trend_fig(player_name: str, recent: list[dict],
+                                        stat_key: str, title: str) -> go.Figure:
+                        vals = [r.get(stat_key) for r in reversed(recent)]
+                        surfs = [r.get("surface", "hard") for r in reversed(recent)]
+                        opp = [r.get("opponent", "") for r in reversed(recent)]
+                        colors = [_SURF_COLOR.get(s, "#546e7a") for s in surfs]
+                        x_labels = [f"vs {o[:10]}" if o else f"M{i+1}"
+                                    for i, o in enumerate(opp)]
+                        # Replace None with 0 for display
+                        y_vals = [v if v is not None else 0.0 for v in vals]
+                        pct_vals = [round(v * 100, 1) for v in y_vals]
+                        fig = go.Figure(go.Bar(
+                            x=x_labels,
+                            y=pct_vals,
+                            marker_color=colors,
+                            text=[f"{v:.1f}%" if vals[i] is not None else "N/A"
+                                  for i, v in enumerate(pct_vals)],
+                            textposition="outside",
+                            hovertemplate="%{x}<br>" + title + ": %{y:.1f}%<extra></extra>",
+                        ))
+                        fig.update_layout(
+                            title=dict(text=f"{player_name} — {title} (last 10)",
+                                       font=dict(size=12)),
+                            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                            font_color="white",
+                            margin=dict(l=10, r=10, t=40, b=60),
+                            height=220,
+                            yaxis=dict(range=[0, 100], ticksuffix="%"),
+                            xaxis=dict(tickangle=-30, tickfont=dict(size=9)),
+                            showlegend=False,
+                        )
+                        return fig
+
+                    with col_chart1:
+                        st.plotly_chart(
+                            _make_trend_fig(p1, rm1, "serve_win_pct", "Serve Win %"),
+                            use_container_width=True, key=f"srv1_{match['match_id']}_{p1}"
+                        )
+                        st.plotly_chart(
+                            _make_trend_fig(p2, rm2, "serve_win_pct", "Serve Win %"),
+                            use_container_width=True, key=f"srv2_{match['match_id']}_{p2}"
+                        )
+                    with col_chart2:
+                        st.plotly_chart(
+                            _make_trend_fig(p1, rm1, "return_win_pct", "Return Win %"),
+                            use_container_width=True, key=f"rtn1_{match['match_id']}_{p1}"
+                        )
+                        st.plotly_chart(
+                            _make_trend_fig(p2, rm2, "return_win_pct", "Return Win %"),
+                            use_container_width=True, key=f"rtn2_{match['match_id']}_{p2}"
+                        )
+                else:
+                    st.caption(
+                        "Serve/return trends unavailable — stats not yet in Sackmann dataset for this period."
+                    )
+
+                st.divider()
+
+    # ── Tab: Player KPIs ───────────────────────────────────────────────────────
+    with tab_kpi:
+        kpi_tour = st.radio("Tour", ["ATP", "WTA"], horizontal=True, key="kpi_tour")
+
+        with st.spinner("Loading player data..."):
+            kpi_records = _fetch_tennis_df(kpi_tour.lower())
+
+        kpi_df = pd.DataFrame(kpi_records) if kpi_records else pd.DataFrame()
+
+        if kpi_df.empty:
+            st.warning(
+                f"No {kpi_tour} data available yet. The Sackmann dataset may not have "
+                "matches for the current year. Check back later in the season."
+            )
+        else:
+            # Build unique player name list
+            kpi_names: list[str] = []
+            for col_n in ("winner_name", "loser_name"):
+                if col_n in kpi_df.columns:
+                    kpi_names.extend(kpi_df[col_n].dropna().unique().tolist())
+            kpi_names = sorted(set(str(n) for n in kpi_names))
+
+            selected_player = st.selectbox(
+                "Select Player", kpi_names, key="kpi_player_sel"
+            )
+
+            if selected_player:
+                with st.spinner(f"Computing stats for {selected_player}..."):
+                    try:
+                        kpi_stats = _tennis_client.get_player_stats(selected_player, kpi_df)
+                    except Exception as _kpi_exc:
+                        st.error(f"Error computing stats: {_kpi_exc}")
+                        kpi_stats = None
+
+                if kpi_stats is None or kpi_stats["data_quality"] == "no_data":
+                    st.warning(f"No match data found for {selected_player}.")
+                else:
+                    overall = kpi_stats.get("overall", {})
+                    fs_stats = kpi_stats.get("first_set_stats", {})
+                    matched_name = kpi_stats.get("matched_name", selected_player)
+
+                    if matched_name != selected_player:
+                        st.caption(f"Matched to dataset name: **{matched_name}**")
+
+                    # ── KPI metric row ─────────────────────────────────────────
+                    total_matches = (overall.get("wins", 0) + overall.get("losses", 0))
+                    win_pct = (overall.get("wins", 0) / total_matches * 100
+                               if total_matches else 0)
+                    avg_spw = overall.get("avg_serve_win_pct")
+                    avg_rpw = overall.get("avg_return_win_pct")
+                    ranking = overall.get("ranking")
+
+                    mc1, mc2, mc3, mc4 = st.columns(4)
+                    mc1.metric(
+                        "Win %",
+                        f"{win_pct:.1f}%",
+                        help=f"{overall.get('wins',0)}W / {overall.get('losses',0)}L",
+                    )
+                    mc2.metric(
+                        "Avg Serve Win %",
+                        f"{avg_spw*100:.1f}%" if avg_spw else "N/A",
+                        help="Serve points won across all tracked matches",
+                    )
+                    mc3.metric(
+                        "Avg Return Win %",
+                        f"{avg_rpw*100:.1f}%" if avg_rpw else "N/A",
+                        help="Return points won across all tracked matches",
+                    )
+                    mc4.metric(
+                        "Ranking",
+                        f"#{ranking}" if ranking else "N/A",
+                        help="Most recent ranking found in dataset",
+                    )
+
+                    st.divider()
+                    chart_col1, chart_col2 = st.columns(2)
+
+                    # ── Surface win % bar chart ────────────────────────────────
+                    with chart_col1:
+                        surf_rec = kpi_stats.get("surface_record", {})
+                        surf_order = ["hard", "clay", "grass"]
+                        surf_data = {
+                            "Surface": [],
+                            "Wins": [],
+                            "Losses": [],
+                        }
+                        for s in surf_order:
+                            if s in surf_rec:
+                                surf_data["Surface"].append(s.capitalize())
+                                surf_data["Wins"].append(surf_rec[s].get("wins", 0))
+                                surf_data["Losses"].append(surf_rec[s].get("losses", 0))
+
+                        if surf_data["Surface"]:
+                            surf_fig = go.Figure()
+                            surf_fig.add_trace(go.Bar(
+                                name="Wins",
+                                x=surf_data["Surface"],
+                                y=surf_data["Wins"],
+                                marker_color="#00e676",
+                            ))
+                            surf_fig.add_trace(go.Bar(
+                                name="Losses",
+                                x=surf_data["Surface"],
+                                y=surf_data["Losses"],
+                                marker_color="#ff5252",
+                            ))
+                            surf_fig.update_layout(
+                                barmode="group",
+                                title="Win / Loss by Surface",
+                                plot_bgcolor="#0e1117",
+                                paper_bgcolor="#0e1117",
+                                font_color="white",
+                                legend=dict(bgcolor="#1e2a3a"),
+                                height=300,
+                            )
+                            st.plotly_chart(surf_fig, use_container_width=True,
+                                            key=f"kpi_surf_{selected_player}")
+                        else:
+                            st.info("No surface breakdown available.")
+
+                    # ── Day of week win rate bar chart ─────────────────────────
+                    with chart_col2:
+                        day_rec = kpi_stats.get("day_record", {})
+                        day_order = ["Monday", "Tuesday", "Wednesday", "Thursday",
+                                     "Friday", "Saturday", "Sunday"]
+                        day_data = {"Day": [], "Win Rate": [], "Matches": []}
+                        for day_name in day_order:
+                            if day_name in day_rec:
+                                w = day_rec[day_name].get("wins", 0)
+                                l = day_rec[day_name].get("losses", 0)
+                                total_d = w + l
+                                wr = round(w / total_d * 100, 1) if total_d else 0
+                                day_data["Day"].append(day_name[:3])
+                                day_data["Win Rate"].append(wr)
+                                day_data["Matches"].append(total_d)
+
+                        if day_data["Day"]:
+                            day_fig = go.Figure(go.Bar(
+                                x=day_data["Day"],
+                                y=day_data["Win Rate"],
+                                marker_color=[
+                                    "#00e676" if v >= 60 else ("#ffeb3b" if v >= 45 else "#ff5252")
+                                    for v in day_data["Win Rate"]
+                                ],
+                                text=[f"{v:.0f}%<br>({n})" for v, n in
+                                      zip(day_data["Win Rate"], day_data["Matches"])],
+                                textposition="outside",
+                                hovertemplate="%{x}: %{y:.1f}% win rate<extra></extra>",
+                            ))
+                            day_fig.update_layout(
+                                title="Win Rate by Day of Week",
+                                plot_bgcolor="#0e1117",
+                                paper_bgcolor="#0e1117",
+                                font_color="white",
+                                yaxis=dict(range=[0, 110], ticksuffix="%"),
+                                height=300,
+                            )
+                            st.plotly_chart(day_fig, use_container_width=True,
+                                            key=f"kpi_day_{selected_player}")
+                        else:
+                            st.info("No day-of-week data available.")
+
+                    # ── First set stats ────────────────────────────────────────
+                    st.divider()
+                    st.markdown("#### First Set Impact")
+                    wfs_pct = fs_stats.get("won_first_set_win_pct")
+                    lfs_pct = fs_stats.get("lost_first_set_win_pct")
+                    fsr     = fs_stats.get("first_set_win_rate")
+
+                    fs_c1, fs_c2, fs_c3 = st.columns(3)
+                    fs_c1.metric(
+                        "Wins first set then wins match",
+                        f"{wfs_pct*100:.1f}%" if wfs_pct is not None else "N/A",
+                        help="Match win % when player wins first set",
+                    )
+                    fs_c2.metric(
+                        "Loses first set then wins match",
+                        f"{lfs_pct*100:.1f}%" if lfs_pct is not None else "N/A",
+                        help="Match win % when player loses first set",
+                    )
+                    fs_c3.metric(
+                        "First set win rate",
+                        f"{fsr*100:.1f}%" if fsr is not None else "N/A",
+                        help="% of matches where player wins the first set",
+                    )
+
+                    # ── Serve KPI averages ─────────────────────────────────────
+                    st.divider()
+                    st.markdown("#### Serve Averages (all tracked matches)")
+                    avg_fs_pct  = overall.get("avg_first_serve_pct")
+                    avg_aces    = overall.get("avg_aces")
+                    avg_dfs     = overall.get("avg_dfs")
+
+                    ka1, ka2, ka3, ka4 = st.columns(4)
+                    ka1.metric(
+                        "First Serve %",
+                        f"{avg_fs_pct*100:.1f}%" if avg_fs_pct else "N/A",
+                    )
+                    ka2.metric(
+                        "Serve Win %",
+                        f"{avg_spw*100:.1f}%" if avg_spw else "N/A",
+                    )
+                    ka3.metric(
+                        "Aces / Match",
+                        f"{avg_aces:.1f}" if avg_aces is not None else "N/A",
+                    )
+                    ka4.metric(
+                        "Double Faults / Match",
+                        f"{avg_dfs:.1f}" if avg_dfs is not None else "N/A",
+                    )
+
+                    # ── Surface serve/return breakdown table ───────────────────
+                    surf_rec2 = kpi_stats.get("surface_record", {})
+                    if surf_rec2:
+                        st.divider()
+                        st.markdown("#### Stats by Surface")
+                        surf_rows = []
+                        for s in ["hard", "clay", "grass"]:
+                            if s not in surf_rec2:
+                                continue
+                            sr = surf_rec2[s]
+                            w2, l2 = sr.get("wins", 0), sr.get("losses", 0)
+                            tot2 = w2 + l2
+                            wr2 = round(w2 / tot2 * 100, 1) if tot2 else 0
+                            swp2 = sr.get("serve_win_pct")
+                            rrp2 = sr.get("return_win_pct")
+                            surf_rows.append({
+                                "Surface": s.capitalize(),
+                                "W": w2, "L": l2,
+                                "Win %": f"{wr2:.1f}%",
+                                "Serve Win %": f"{swp2*100:.1f}%" if swp2 else "N/A",
+                                "Return Win %": f"{rrp2*100:.1f}%" if rrp2 else "N/A",
+                            })
+                        if surf_rows:
+                            st.dataframe(
+                                pd.DataFrame(surf_rows),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
