@@ -129,6 +129,11 @@ def _init_state():
         "committed_bankroll":  100.0,
         "committed_max_picks": 10,
         "committed_min_conf":  55,
+        # Smart Picks filters (instant-apply, no recalc needed)
+        "sp_min_odds":    -180,
+        "sp_max_odds":     300,
+        "sp_min_win_prob": 50,
+        "sp_max_picks":    10,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -152,6 +157,21 @@ def _run_pipeline(sport_filter, ev_thresh, kelly_frac, bankroll, min_conf, max_p
     return [p.to_dict() for p in picks], picks, stats, api_rem
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def _run_winners_pipeline(sport_filter, kelly_frac, bankroll):
+    """Low-threshold pipeline for Smart Picks — gets all +EV candidates so we
+    can rank and filter by win probability in the UI."""
+    from run import run_pipeline
+    import config as cfg
+    cfg.EV_THRESHOLD           = 0.01   # 1% — just needs to be positive
+    cfg.DEFAULT_KELLY_FRACTION = kelly_frac
+    cfg.STARTING_BANKROLL      = bankroll
+    cfg.MIN_CONFIDENCE         = 0
+    cfg.MAX_PICKS_PER_DAY      = 50
+    picks, stats, api_rem = run_pipeline(sport_filter or None)
+    return [p.to_dict() for p in picks], stats, api_rem
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -161,7 +181,7 @@ with st.sidebar:
 
     page = st.radio(
         "Page",
-        ["Today's Picks", "Bankroll", "Bet History", "Settle Bets"],
+        ["Smart Picks", "Today's Picks", "Bankroll", "Bet History", "Settle Bets"],
         label_visibility="collapsed",
     )
 
@@ -214,6 +234,36 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+    # Smart Picks filters (instant — no recalc button needed)
+    if page == "Smart Picks":
+        st.divider()
+        st.markdown("### Winner Filter")
+        st.caption("Applied instantly — no Recalculate needed.")
+        st.session_state["sp_min_odds"] = st.slider(
+            "Exclude odds heavier than",
+            min_value=-350, max_value=0,
+            value=st.session_state["sp_min_odds"], step=10,
+            format="%d",
+            help="e.g. -180 excludes -200, -250, etc. Avoids massive favorites.",
+        )
+        st.session_state["sp_max_odds"] = st.slider(
+            "Exclude longshots above",
+            min_value=100, max_value=500,
+            value=st.session_state["sp_max_odds"], step=25,
+            format="+%d",
+            help="Avoids low-probability bets with inflated payouts.",
+        )
+        st.session_state["sp_min_win_prob"] = st.slider(
+            "Min win probability",
+            min_value=40, max_value=75,
+            value=st.session_state["sp_min_win_prob"], step=1,
+            format="%d%%",
+        )
+        st.session_state["sp_max_picks"] = st.slider(
+            "Max picks shown", 1, 15,
+            value=st.session_state["sp_max_picks"],
+        )
+
     # Cache status
     any_cached = any(is_cached(f"dk_odds_{v}") for v in config.SUPPORTED_SPORTS.values())
     if any_cached:
@@ -240,10 +290,236 @@ min_conf     = st.session_state["committed_min_conf"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PAGE: Smart Picks  (win-probability first, odds-filtered)
+# ══════════════════════════════════════════════════════════════════════════════
+
+if page == "Smart Picks":
+    st.title("Smart Picks")
+    sp_min_odds  = st.session_state["sp_min_odds"]
+    sp_max_odds  = st.session_state["sp_max_odds"]
+    sp_min_win   = st.session_state["sp_min_win_prob"] / 100
+    sp_max_picks = st.session_state["sp_max_picks"]
+
+    st.caption(
+        f"Ranked by win probability × confidence  ·  "
+        f"Odds {sp_min_odds:+d} to {sp_max_odds:+d}  ·  "
+        f"Min win prob {st.session_state['sp_min_win_prob']}%  ·  "
+        f"Kelly {kelly:.0%}  ·  Bankroll ${bankroll_val:,.0f}"
+    )
+
+    with st.spinner("Running pipeline (odds cached daily)..."):
+        try:
+            sp_dicts, sp_stats, sp_api_rem = _run_winners_pipeline(
+                sport_arg, kelly, bankroll_val
+            )
+        except Exception as exc:
+            st.error(f"Pipeline error: {exc}")
+            st.info("Check that ODDS_API_KEY is set in your Streamlit secrets or .env")
+            st.stop()
+
+    if sp_dicts and "game_id" not in sp_dicts[0]:
+        st.cache_data.clear()
+        st.rerun()
+
+    # ── Filter by odds window + minimum win probability ────────────────────────
+    filtered = [
+        p for p in sp_dicts
+        if sp_min_odds <= p["dk_odds"] <= sp_max_odds
+        and p["model_prob"] >= sp_min_win
+    ]
+
+    # Rank by win_score = model_prob × (confidence / 100)
+    filtered.sort(key=lambda p: p["model_prob"] * p["confidence"] / 100, reverse=True)
+    filtered = filtered[:sp_max_picks]
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Picks", len(filtered))
+    c2.metric("API Requests Left", sp_api_rem if sp_api_rem is not None else "cached")
+    if filtered:
+        avg_win  = sum(p["model_prob"] for p in filtered) / len(filtered)
+        avg_conf = sum(p["confidence"] for p in filtered) / len(filtered)
+        c3.metric("Avg Win Prob", f"{avg_win:.1%}")
+        c4.metric("Avg Confidence", f"{avg_conf:.0f}/100")
+
+    if not filtered:
+        st.warning(
+            "No picks match the current filter. "
+            "Try widening the odds range or lowering the min win probability."
+        )
+        st.info(
+            "The Smart Picks pipeline uses a 1% EV floor to surface candidates. "
+            "If still empty, check that today's odds have been fetched (sidebar)."
+        )
+        st.stop()
+
+    st.divider()
+    st.markdown("### Top Picks by Win Probability")
+    st.caption(
+        "Odds extremes filtered out — focused on bets the model believes in "
+        "at prices that are actually worth taking."
+    )
+
+    def _win_prob_color(prob: float) -> str:
+        if prob >= 0.63: return "#00e676"
+        if prob >= 0.54: return "#ffeb3b"
+        return "#90a4ae"
+
+    def _win_card_class(prob: float) -> str:
+        if prob >= 0.63: return "bet-card bet-card-high"
+        if prob >= 0.54: return "bet-card bet-card-med"
+        return "bet-card bet-card-low"
+
+    from models.kelly_criterion import kelly_fraction as _kf_sp
+    from models.ev_calculator import american_to_decimal as _a2d_sp
+
+    for i, p in enumerate(filtered, 1):
+        prob      = p["model_prob"]
+        conf      = p["confidence"]
+        prob_col  = _win_prob_color(prob)
+        card_cls  = _win_card_class(prob)
+        odds_str  = f"+{p['dk_odds']:.0f}" if p["dk_odds"] >= 0 else f"{p['dk_odds']:.0f}"
+        edge_pct  = p.get("edge_pct", round((prob - p["implied_prob"]) * 100, 1))
+        bet_team  = p.get("bet_team", p["side"])
+        bet_lbl   = p["bet_type"].replace("total_", "").replace("_", " ").title()
+        side_disp = p["side"].upper() + (f" {p['line']:+g}" if p["line"] else "")
+        signals_html = _signal_html(p.get("signals", []))
+
+        live_frac  = _kf_sp(prob, p["dk_odds"], kelly)
+        live_stake = round(bankroll_val * live_frac, 2)
+        payout_per_100 = round((_a2d_sp(p["dk_odds"]) - 1) * 100, 0)
+
+        try:
+            game_dt = datetime.strptime(p["commence"], "%m/%d %H:%M").replace(year=datetime.now().year)
+            mins_left = int((game_dt - datetime.now()).total_seconds() / 60)
+            if mins_left < 0:     time_badge_col, time_label = "#546e7a", "Started"
+            elif mins_left < 60:  time_badge_col, time_label = "#ff5252", f"{mins_left}m to tip"
+            elif mins_left < 180: time_badge_col, time_label = "#ffeb3b", f"{mins_left//60}h {mins_left%60}m to tip"
+            else:                 time_badge_col, time_label = "#00e676", f"{mins_left//60}h to tip"
+        except Exception:
+            time_badge_col, time_label = "#546e7a", p["commence"]
+
+        st.markdown(f"""
+<div class="{card_cls}">
+
+  <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+      <span style="background:#1e3a5f; color:#90caf9; border-radius:50%; width:28px; height:28px;
+                   display:inline-flex; align-items:center; justify-content:center;
+                   font-weight:800; font-size:0.9rem; flex-shrink:0;">#{i}</span>
+      <span class="tag tag-sport">{p['sport']}</span>
+      <span class="tag tag-type">{bet_lbl}</span>
+      <span style="font-size:1.2rem; font-weight:800; color:#ffffff; margin-left:6px;">{p['game']}</span>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center;">
+      <span style="background:{time_badge_col}22; color:{time_badge_col}; border:1px solid {time_badge_col};
+                   padding:2px 10px; border-radius:20px; font-size:0.8rem; font-weight:600;">
+        {time_label}
+      </span>
+      <span style="font-size:1.8rem; font-weight:900; color:{prob_col};">{prob:.0%} WIN</span>
+    </div>
+  </div>
+
+  <div style="margin-top:10px; padding:8px 12px; background:#0d1520;
+              border-radius:6px; font-size:0.9rem; color:#cfd8dc;">
+    Betting <b style="color:#fff;">{bet_team}</b> ({bet_lbl} {side_disp} <b style="color:{prob_col};">{odds_str}</b>).
+    Model: <b style="color:{prob_col};">{prob:.1%}</b> win chance vs book's {p['implied_prob']:.1%}.
+    Edge: <b style="color:{prob_col};">+{edge_pct:.1f}%</b>
+  </div>
+
+  <div style="margin-top:14px; display:flex; gap:28px; flex-wrap:wrap;">
+    <div>
+      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Bet</div>
+      <div style="font-size:1.25rem; font-weight:800; color:#ffffff;">{bet_team}</div>
+      <div style="font-size:0.85rem; color:#b0bec5;">{bet_lbl} &nbsp;{side_disp}</div>
+    </div>
+    <div>
+      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Odds</div>
+      <div style="font-size:1.4rem; font-weight:800; color:#ffffff;">{odds_str}</div>
+      <div style="font-size:0.8rem; color:#b0bec5;">+${payout_per_100:.0f} per $100</div>
+    </div>
+    <div>
+      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Win Prob</div>
+      <div style="font-size:1.4rem; font-weight:800; color:{prob_col};">{prob:.1%}</div>
+      <div style="font-size:0.85rem; color:#b0bec5;">book: {p['implied_prob']:.1%}</div>
+    </div>
+    <div>
+      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Stake (Kelly)</div>
+      <div style="font-size:1.25rem; font-weight:800; color:#ffffff;">${live_stake:.2f}</div>
+      <div style="font-size:0.85rem; color:#b0bec5;">{live_frac:.1%} of ${bankroll_val:,.0f}</div>
+    </div>
+    <div>
+      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">Confidence</div>
+      <div style="font-size:1.25rem; font-weight:800; color:{_conf_color(conf)};">
+        {conf}/100 <span style="font-size:0.8rem; color:#b0bec5;">({_conf_label(conf)})</span>
+      </div>
+      <div style="font-size:0.8rem; color:#b0bec5;">{p.get('data_quality','cold')} data</div>
+    </div>
+    <div>
+      <div style="color:#78909c; font-size:0.7rem; text-transform:uppercase; letter-spacing:1px;">EV</div>
+      <div style="font-size:1.25rem; font-weight:800; color:{_ev_color(p['ev_pct'])};">{p['ev_pct']:+.1f}%</div>
+      <div style="font-size:0.8rem; color:#b0bec5;">expected value</div>
+    </div>
+  </div>
+
+  <div style="margin-top:14px; border-top:1px solid #1e2e42; padding-top:10px;
+              font-size:0.85rem; line-height:1.9; color:#b0bec5;">
+    <span style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1px; color:#546e7a;">
+      Signals for {bet_team}</span><br>
+    {signals_html if signals_html else '<span style="color:#546e7a;">No signal data — cold-start model</span>'}
+  </div>
+
+</div>
+""", unsafe_allow_html=True)
+
+    # ── Log bet ───────────────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("Log a bet to tracker"):
+        from models.kelly_criterion import kelly_fraction as kf
+        from bets.edge_detector import EdgeBet
+
+        sp_labels = [
+            f"#{i}  {d['game']}  —  "
+            f"{d['bet_type'].replace('total_','').title()} {d['side'].upper()}"
+            + (f" {d['line']:+g}" if d['line'] else "")
+            + f"  ({'+' if d['dk_odds']>=0 else ''}{int(d['dk_odds'])})"
+            for i, d in enumerate(filtered, 1)
+        ]
+        sp_idx = st.selectbox("Pick to log", range(len(filtered)),
+                              format_func=lambda x: sp_labels[x], key="sp_log_sel")
+        sel = filtered[sp_idx]
+
+        c1, c2 = st.columns(2)
+        actual_odds  = c1.number_input("Odds placed at (American)", value=int(sel["dk_odds"]),
+                                       step=1, key="sp_odds_input")
+        sp_frac      = kf(sel["model_prob"], float(actual_odds), kelly)
+        default_stk  = round(bankroll_val * sp_frac, 2)
+        actual_stake = c2.number_input("Stake ($)", value=float(default_stk),
+                                       min_value=0.01, step=0.50, key="sp_stake_input")
+
+        tracker = BankrollTracker(starting_bankroll=bankroll_val)
+        if st.button("Log Bet", type="primary", key="sp_log_btn"):
+            eb = EdgeBet(
+                sport=sel["sport"], game_id=sel["game_id"],
+                home_team=sel["home_team"], away_team=sel["away_team"],
+                commence_time=datetime.fromisoformat(sel["commence_time_iso"]),
+                bet_type=sel["bet_type"], side=sel["side"], line=sel["line"],
+                best_book="draftkings", best_odds=float(actual_odds),
+                model_prob=sel["model_prob"], implied_prob=sel["implied_prob"],
+                ev_pct=sel["ev_pct"], kelly_frac=sp_frac,
+                recommended_stake=actual_stake, is_sharp_book=False,
+            )
+            bid = tracker.log_bet(eb, bankroll=bankroll_val)
+            ods = f"+{int(actual_odds)}" if actual_odds >= 0 else str(int(actual_odds))
+            st.success(f"Logged Bet #{bid} — {sel['bet_team']} {ods} · Stake ${actual_stake:.2f}")
+            st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE: Today's Picks
 # ══════════════════════════════════════════════════════════════════════════════
 
-if page == "Today's Picks":
+elif page == "Today's Picks":
     st.title("Today's Top Picks")
     st.caption(
         f"DraftKings only  ·  Min EV {ev_min:.0%}  ·  "
