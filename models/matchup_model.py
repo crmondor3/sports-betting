@@ -40,6 +40,9 @@ W_HOME_AWAY = _DEFAULT_WEIGHTS["home_away"]
 W_H2H       = _DEFAULT_WEIGHTS["h2h"]
 W_REST      = _DEFAULT_WEIGHTS["rest"]
 
+# Home advantage used when computing elo_diff for the GB model feature
+_SPORT_HOME_ADV_MAP: dict[str, float] = {"NFL": 70, "NBA": 35, "MLB": 18, "NHL": 28}
+
 
 @dataclass
 class Signal:
@@ -101,10 +104,61 @@ class MatchupAnalyzer:
     """
     Takes an EloModel (pre-fitted) + ESPN matchup data and produces
     a MatchupPrediction with confidence score and signal breakdown.
+    If a trained_bundle (from models/trainer.py) is supplied, the gradient
+    boosting model replaces the heuristic probability blend while keeping
+    all signals for display.
     """
 
-    def __init__(self, elo_model=None):
-        self._elo = elo_model
+    def __init__(self, elo_model=None, trained_bundle: dict | None = None):
+        self._elo    = elo_model
+        self._bundle = trained_bundle
+
+    def _gb_prob(self, matchup: MatchupData, elo_diff: float) -> float | None:
+        """
+        Compute home win probability from the trained gradient boosting model.
+        Returns None if the bundle is missing or feature computation fails.
+        """
+        if not self._bundle:
+            return None
+        try:
+            import numpy as np
+            hf = matchup.home_form
+            af = matchup.away_form
+            h2h = matchup.h2h
+
+            h_rest  = min(hf.rest_days or 3, 7)
+            a_rest  = min(af.rest_days or 3, 7)
+            h_l10n  = hf.last_10_wins + hf.last_10_losses
+            a_l10n  = af.last_10_wins + af.last_10_losses
+            h_l10   = hf.last_10_wins / h_l10n if h_l10n else 0.5
+            a_l10   = af.last_10_wins / a_l10n if a_l10n else 0.5
+            h_ppg   = (hf.ppg or 0) - (hf.papg or 0)
+            a_ppg   = (af.ppg or 0) - (af.papg or 0)
+            h_ha    = hf.home_win_pct if (hf.home_wins + hf.home_losses) >= 5 else 0.5
+            a_ha    = af.away_win_pct if (af.away_wins + af.away_losses) >= 5 else 0.5
+            h2h_adv = (h2h.home_h2h_win_pct - 0.5) if h2h.meetings >= 3 else 0.0
+
+            feat = np.array([[
+                elo_diff,
+                h_rest,         a_rest,
+                h_rest - a_rest,
+                1 if h_rest <= 1 else 0,
+                1 if a_rest <= 1 else 0,
+                h_l10,          a_l10,
+                h_l10 - a_l10,
+                h_ppg,          a_ppg,
+                h_ppg - a_ppg,
+                h_ha,           a_ha,
+                h2h_adv,
+            ]], dtype=float)
+
+            scaler = self._bundle["scaler"]
+            model  = self._bundle["model"]
+            prob   = float(model.predict_proba(scaler.transform(feat))[0, 1])
+            return max(0.03, min(0.97, prob))
+        except Exception as exc:
+            logger.debug("GB prediction failed: %s", exc)
+            return None
 
     def analyse(self, matchup: MatchupData) -> MatchupPrediction:
         home = matchup.home_team
@@ -200,23 +254,29 @@ class MatchupAnalyzer:
         # ── Sport-specific weights ────────────────────────────────────────────
         w = _SPORT_WEIGHTS.get(sport.upper(), _DEFAULT_WEIGHTS)
 
-        # ── Blend probabilities ────────────────────────────────────────────────
-        # Start from Elo, then nudge with each signal using sport-appropriate weights
-        p_home = elo_prob_home
+        # ── Probability ───────────────────────────────────────────────────────
+        # If a trained GB model is available, use it (trained on 3 seasons of
+        # actual outcomes).  Elo diff is the strongest single predictor inside
+        # the GB model; heuristic signals feed directly into GB features.
+        # Without a trained model, fall back to the hand-tuned heuristic blend.
+        # elo_diff for GB includes home advantage points
+        _elo_diff_with_ha = home_elo + _SPORT_HOME_ADV_MAP.get(sport.upper(), 50.0) - away_elo
+        gb_prob = self._gb_prob(matchup, _elo_diff_with_ha)
 
-        if (hf.wins + hf.losses) > 0:
-            p_home = _clamp(p_home + form_diff * w["form"])
-
-        if (hf.home_wins + hf.home_losses) > 5:
-            p_home = _clamp(p_home + split_diff * w["home_away"])
-
-        if h2h.meetings >= 3:
-            p_home = _clamp(p_home + h2h_diff * w["h2h"])
-
-        if abs(rest_diff) >= 1:
-            # Rest advantage: normalise to [-1, 1] range then apply weight
-            rest_norm = min(abs(rest_diff) / 3, 1.0) * (1 if rest_diff > 0 else -1)
-            p_home = _clamp(p_home + rest_norm * w["rest"] * 0.3)
+        if gb_prob is not None:
+            p_home = gb_prob
+        else:
+            # Heuristic fallback: start from Elo, nudge with signals
+            p_home = elo_prob_home
+            if (hf.wins + hf.losses) > 0:
+                p_home = _clamp(p_home + form_diff * w["form"])
+            if (hf.home_wins + hf.home_losses) > 5:
+                p_home = _clamp(p_home + split_diff * w["home_away"])
+            if h2h.meetings >= 3:
+                p_home = _clamp(p_home + h2h_diff * w["h2h"])
+            if abs(rest_diff) >= 1:
+                rest_norm = min(abs(rest_diff) / 3, 1.0) * (1 if rest_diff > 0 else -1)
+                p_home = _clamp(p_home + rest_norm * w["rest"] * 0.3)
 
         # ── Confidence score ──────────────────────────────────────────────────
         # Signal agreement weighted by sport-relevant magnitudes.

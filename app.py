@@ -255,10 +255,31 @@ with st.sidebar:
         value=int(st.session_state["ev_max_odds"]), step=25, format="+%d",
     )
     st.session_state["bankroll"] = st.number_input(
-        "Today's bankroll ($)", 10.0,
+        "Starting bankroll ($)", 10.0,
         value=float(st.session_state["bankroll"]), step=10.0,
-        help="Bet stakes are sized as quarter-Kelly × this amount.",
+        help="Your base stake. Actual sizing compounds automatically with real P&L.",
     )
+    # Show compounded effective bankroll
+    try:
+        from tracker.database import session_scope as _sbss
+        from tracker.models import Bet as _sbBM
+        from sqlalchemy import func as _sbf
+        with _sbss() as _sbs:
+            _sb_pnl = _sbs.query(_sbf.sum(_sbBM.pnl_kelly)).filter(
+                _sbBM.settled == True,
+                _sbBM.bookmaker != "espn_historical",
+            ).scalar() or 0.0
+        _sb_eff = max(round(st.session_state["bankroll"] + _sb_pnl, 2), st.session_state["bankroll"] * 0.10)
+        _sb_delta = _sb_eff - st.session_state["bankroll"]
+        if abs(_sb_delta) > 0.01:
+            _sb_color = "#00e676" if _sb_delta >= 0 else "#ff5252"
+            st.markdown(
+                f'<div style="font-size:0.82rem;color:{_sb_color};margin-top:-4px;">'
+                f'Effective: <b>${_sb_eff:,.2f}</b> ({_sb_delta:+.2f} real P&L)</div>',
+                unsafe_allow_html=True,
+            )
+    except Exception:
+        pass
 
     # Show calibration status
     _cal = _calibrator
@@ -287,14 +308,51 @@ with st.sidebar:
     st.caption("Cache refreshes automatically at 7 AM ET daily.")
 
     st.divider()
-    st.markdown("### Calibration Training")
-    st.caption("Seed model with last 30 days of ESPN results for faster calibration.")
-    if st.button("Run 30-Day Backfill", use_container_width=True,
-                 help="Fetches completed games from ESPN, runs model predictions, inserts settled training bets. Takes ~1 min."):
+    st.markdown("### ML Model Training")
+    st.caption("Trains a gradient-boosting model on 3 seasons of ESPN history per sport. Run once — re-run monthly.")
+
+    # Show current model status per sport
+    from models.trainer import load as _load_bundle
+    _any_trained = False
+    for _sl in config.SUPPORTED_SPORTS:
+        _b = _load_bundle(_sl)
+        if _b:
+            _any_trained = True
+            _trained_dt = _b.get("trained_at", "?")[:10]
+            st.caption(
+                f"{_sl}: BSS={_b.get('bss', 0):.3f} · "
+                f"Brier={_b.get('brier', 0):.4f} · "
+                f"n={_b.get('n_games', 0):,} · {_trained_dt}"
+            )
+    if not _any_trained:
+        st.warning("No trained model yet — click Train to build it.")
+
+    if st.button("Train Model (3 seasons)", use_container_width=True,
+                 help="Fetches 3 seasons of ESPN data per sport, trains gradient boosting models. Takes 2-5 mins on first run (cached after)."):
+        from models.trainer import train_all as _train_all
+        _tprog = st.empty()
+        with st.spinner("Training… this may take a few minutes on first run."):
+            _results = _train_all(years_back=3, progress_cb=lambda m: _tprog.caption(m))
+        _tprog.empty()
+        _ok = [r for r in _results if "error" not in r]
+        _fail = [r for r in _results if "error" in r]
+        if _ok:
+            st.success(f"Trained {len(_ok)} sport models. Reloading pipeline…")
+        if _fail:
+            for _fr in _fail:
+                st.warning(f"{_fr['sport']}: {_fr.get('error', 'failed')}")
+        st.cache_data.clear()
+        st.rerun()
+
+    st.divider()
+    st.markdown("### Calibration Seeding")
+    st.caption("Seed calibrator with last 90 days of ESPN results.")
+    if st.button("Run 90-Day Backfill", use_container_width=True,
+                 help="Fetches completed games from ESPN, runs model predictions, inserts settled training bets."):
         from data.historical_backfill import run_backfill
         _prog = st.empty()
         with st.spinner("Fetching ESPN historical results…"):
-            _n = run_backfill(days=30, progress_cb=lambda m: _prog.caption(m))
+            _n = run_backfill(days=90, progress_cb=lambda m: _prog.caption(m))
         _prog.empty()
         if _n > 0:
             st.success(f"Added {_n} historical bets — rebuilding calibrator…")
@@ -316,6 +374,20 @@ odds_hi       = st.session_state["ev_max_odds"]
 
 from models.kelly_criterion import kelly_fraction as _kf
 from models.ev_calculator import american_to_decimal as _a2d, decimal_to_american as _d2a, calculate_ev as _cev
+
+# ── Compound bankroll: user input + real settled P&L (excludes $1 training bets) ─
+try:
+    from tracker.database import session_scope as _ss
+    from tracker.models import Bet as _BM
+    from sqlalchemy import func as _func
+    with _ss() as _s:
+        _real_pnl = _s.query(_func.sum(_BM.pnl_kelly)).filter(
+            _BM.settled == True,
+            _BM.bookmaker != "espn_historical",
+        ).scalar() or 0.0
+    _effective_bankroll = max(round(bankroll_val + _real_pnl, 2), bankroll_val * 0.10)
+except Exception:
+    _effective_bankroll = bankroll_val
 
 # ── Injury monitor — fetched once per session, cached daily ───────────────────
 if "injury_map" not in st.session_state:
@@ -346,7 +418,14 @@ else:
             st.rerun()
 
         # Apply calibration + multi-signal Kelly scaling
+        from data.news_monitor import injuries_for_teams as _inj2
         for _pd in _all_dicts:
+            # Skip confirmed losing segments — no stake, still show in UI at $0
+            if not _calibrator.is_profitable_segment(_pd["sport"], _pd["bet_type"]):
+                _pd["kelly_frac"]  = 0.0
+                _pd["_kelly_mult"] = 0.0
+                continue
+
             _adj_p = _calibrator.calibrate_prob(_pd["model_prob"], _pd["sport"], _pd["bet_type"])
             _km    = _calibrator.kelly_multiplier(_pd["sport"])
 
@@ -358,19 +437,22 @@ else:
             )
 
             # Injury fade: if the BET SIDE team has OUT players, reduce stake 40%
-            from data.news_monitor import injuries_for_teams as _inj2
             _h_inj, _a_inj = _inj2(_pd["home_team"], _pd["away_team"], _injury_map)
             _bet_inj = _h_inj if _pd["side"] in ("home", "over", "under") else _a_inj
             _inj_mult = 0.60 if any(i["status"].lower() == "out" for i in _bet_inj) else 1.0
 
-            _final_km = _km * _book_mult * _inj_mult
+            # Strong-signal boost: market confirms our edge → double stake size
+            _me = _pd.get("market_edge", 0.0)
+            _strong_mult = 2.0 if (_me > 2.0 and _nb >= 4) else 1.0
+
+            _final_km = _km * _book_mult * _inj_mult * _strong_mult
             _pd["model_prob"]  = _adj_p
             _pd["ev_pct"]      = _cev(_adj_p, _pd["dk_odds"]) * 100
             _pd["kelly_frac"]  = _kf(_adj_p, _pd["dk_odds"], _KELLY * _final_km)
             _pd["_kelly_mult"] = _final_km
 
-        # Auto-log all picks to DB (idempotent — skips already-logged game+type+side)
-        _n_new = _auto_log_model_picks(_all_dicts, bankroll_val, _KELLY)
+        # Auto-log all picks to DB using compound bankroll for stake sizing
+        _n_new = _auto_log_model_picks(_all_dicts, _effective_bankroll, _KELLY)
         if _n_new > 0:
             # Immediately try to settle any that have already completed
             from tracker.auto_settle import auto_settle as _settle_new
@@ -462,7 +544,7 @@ if page == "EV Picks":
                 _sigs    = _signal_html(_p.get("signals", []))
                 _km      = _p.get("_kelly_mult", 1.0)
                 _frac    = _p["kelly_frac"]
-                _stake   = round(bankroll_val * _frac, 2)
+                _stake   = round(_effective_bankroll * _frac, 2)
                 _payout  = round((_a2d(_p["dk_odds"]) - 1) * 100, 0)
                 _be_dec  = 1 / _prob
                 _be_amer = _d2a(_be_dec)
@@ -519,6 +601,13 @@ if page == "EV Picks":
                 _cons_p    = _p.get("consensus_prob")
                 _nb        = _p.get("n_books", 0)
                 _medge_col = "#00e676" if _medge > 0 else "#ff5252"
+                _strong_signal = _medge > 2.0 and _nb >= 4
+                _strong_badge  = (
+                    '<span style="background:#00e67622;color:#00e676;border:1px solid #00e676;'
+                    'padding:2px 10px;border-radius:20px;font-size:0.78rem;font-weight:700;">'
+                    '&#9889; STRONG SIGNAL &middot; 2&times; stake</span>'
+                    if _strong_signal else ""
+                )
                 _cons_html = ""
                 if _cons_p:
                     _cons_vs_dk = _medge
@@ -551,6 +640,7 @@ if page == "EV Picks":
       <span style="background:{_tbcol}22;color:{_tbcol};border:1px solid {_tbcol};
                    padding:2px 10px;border-radius:20px;font-size:0.8rem;font-weight:600;">{_tlbl}</span>
       <span style="font-size:2rem;font-weight:900;color:{_ev_col};">{_ev:+.1f}% EV</span>
+      {_strong_badge}
     </div>
   </div>
   {_inj_html}

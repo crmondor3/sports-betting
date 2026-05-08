@@ -48,11 +48,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _CACHE_PATH = Path(__file__).parent.parent / "cache" / "calibration.json"
-_MIN_SAMPLE  = 10    # bets needed before applying any per-group correction
-_FULL_TRUST  = 80    # samples for full calibration weight (longer runway = less noise)
-_MAX_WEIGHT  = 0.70  # maximum calibration blend weight (retain 30% prior)
-_MAX_FACTOR  = 1.35  # cap upward correction
-_MIN_FACTOR  = 0.70  # cap downward correction
+_MIN_SAMPLE  = 5     # bets needed before applying any per-group correction
+_FULL_TRUST  = 40    # samples for full calibration weight
+_MAX_WEIGHT  = 0.85  # maximum calibration blend weight (retain 15% prior)
+_MAX_FACTOR  = 1.40  # cap upward correction
+_MIN_FACTOR  = 0.65  # cap downward correction
 
 
 def _blend_factor(raw: float, n: int) -> float:
@@ -73,6 +73,8 @@ class ModelCalibrator:
         self._sport_factor: dict[str, float] = {}
         self._type_factor:  dict[str, float] = {}
         self._kelly_mult:   dict[str, float] = {}  # sport → Kelly confidence
+        self._segment_roi:  dict[tuple, float] = {}  # (sport, bet_type) → ROI %
+        self._segment_n:    dict[tuple, int]   = {}  # (sport, bet_type) → sample count
         self.n_settled:     int              = 0
         self.brier_score:   float | None     = None
         self.log_loss:      float | None     = None
@@ -174,6 +176,8 @@ class ModelCalibrator:
         for b in bets:
             groups[(b.sport, b.bet_type)].append(b)
 
+        self._segment_roi = {}
+        self._segment_n   = {}
         rows = []
         for (sport, bt), grp in sorted(groups.items()):
             n      = len(grp)
@@ -184,6 +188,8 @@ class ModelCalibrator:
             exp    = sum(b.model_prob or 0.5 for b in grp) / n if n else 0.0
             avg_ev = sum(b.ev_pct or 0 for b in grp) / n if n else 0.0
             roi    = pnl / staked * 100 if staked > 0 else 0.0
+            self._segment_roi[(sport, bt)] = roi
+            self._segment_n[(sport, bt)]   = n
             factor = self.get_combined_factor(sport, bt)
             km     = self._kelly_mult.get(sport, 1.0)
             rows.append({
@@ -224,6 +230,19 @@ class ModelCalibrator:
     def kelly_multiplier(self, sport: str) -> float:
         """Kelly confidence for a sport (0.40–1.0). 1.0 = full trust."""
         return self._kelly_mult.get(sport, 1.0)
+
+    def is_profitable_segment(self, sport: str, bet_type: str) -> bool:
+        """
+        True if this (sport, bet_type) segment should be bet.
+        Small-sample segments get the benefit of the doubt (True).
+        Confirmed losing segments (n >= _MIN_SAMPLE and ROI < -5%) return False.
+        """
+        key = (sport, bet_type)
+        n = self._segment_n.get(key, 0)
+        if n < _MIN_SAMPLE:
+            return True  # insufficient data — don't filter
+        roi = self._segment_roi.get(key, 0.0)
+        return roi > -5.0  # allow break-even; kill only confirmed losers
 
     def model_quality_label(self) -> str:
         if self.n_settled < _MIN_SAMPLE:

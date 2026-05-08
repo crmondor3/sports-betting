@@ -68,7 +68,15 @@ def run_backfill(
     new_rows: list[Bet] = []
 
     for sport_label, sport_key in config.SUPPORTED_SPORTS.items():
-        elo      = EloModel(sport=sport_label)
+        elo    = EloModel(sport=sport_label)
+        # Seed Elo from trained model if available
+        try:
+            from models.trainer import load as _load_b
+            _b = _load_b(sport_label)
+            if _b and _b.get("final_elo"):
+                elo._ratings = dict(_b["final_elo"])
+        except Exception:
+            pass
         analyzer = MatchupAnalyzer(elo_model=elo)
         inserted = 0
 

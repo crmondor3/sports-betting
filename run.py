@@ -316,8 +316,16 @@ def run_pipeline(
                 logger.info("%s: no DraftKings games today", label)
                 continue
 
-            # Bootstrap models with sport-specific parameters
+            # Load trained GB bundle — contains final Elo ratings from 3 seasons of data
+            from models.trainer import load as load_bundle
+            bundle = load_bundle(label)
+
+            # Bootstrap Elo — seed from trained ratings if available (avoids cold-start)
             elo = EloModel(sport=label)
+            if bundle and bundle.get("final_elo"):
+                elo._ratings = dict(bundle["final_elo"])
+                logger.info("%s: seeded Elo from %d trained ratings", label, len(elo._ratings))
+
             poisson = PoissonModel()
 
             # Try to seed Poisson from ESPN scoring averages
@@ -334,7 +342,7 @@ def run_pipeline(
                 except Exception as exc:
                     logger.warning("Poisson fit failed for %s: %s", label, exc)
 
-            analyzer = MatchupAnalyzer(elo_model=elo)
+            analyzer = MatchupAnalyzer(elo_model=elo, trained_bundle=bundle)
 
             now_utc = datetime.now(timezone.utc)
             for game in games:
