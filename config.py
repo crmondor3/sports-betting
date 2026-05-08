@@ -30,8 +30,14 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///sports_betting.db")
 # ── The Odds API ──────────────────────────────────────────────────────────────
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
-# Single sportsbook — DraftKings only
+# Primary sportsbook for bet placement
 TARGET_BOOK = "draftkings"
+
+# All US books fetched for consensus probability (same API credit cost as single book)
+CONSENSUS_BOOKS = "draftkings,fanduel,betmgm,caesars,betrivers,williamhill_us,pointsbetus,espnbet"
+
+# Minimum books needed to trust consensus over ESPN model
+MIN_BOOKS_FOR_CONSENSUS = 3
 
 SUPPORTED_SPORTS = {
     "NFL": "americanfootball_nfl",

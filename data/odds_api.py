@@ -22,6 +22,13 @@ ODDS_FORMAT = "american"
 TARGET_BOOK = config.TARGET_BOOK   # "draftkings"
 
 
+def _impl_prob(american: float) -> float:
+    """Raw implied probability from American odds (no vig removal)."""
+    if american >= 0:
+        return 100.0 / (american + 100.0)
+    return abs(american) / (abs(american) + 100.0)
+
+
 @dataclass
 class OddsGame:
     game_id: str
@@ -31,6 +38,10 @@ class OddsGame:
     away_team: str
     # market_key → list of outcomes for DraftKings only
     markets: dict[str, list[dict]] = field(default_factory=dict)
+    # No-vig consensus probability across all fetched books
+    # keys: "home", "away", "over", "under"
+    consensus_probs: dict[str, float] = field(default_factory=dict)
+    n_books: int = 0   # how many books contributed to consensus
 
     def get_line(self, market: str, side: str) -> float | None:
         """Return American odds for a side in a given market, or None."""
@@ -52,6 +63,17 @@ class OddsGame:
             if o.get("name", "").lower() == "over":
                 return o.get("point")
         return None
+
+    def market_edge(self, side: str, dk_odds: float) -> float:
+        """
+        Consensus no-vig prob minus DK implied prob for a side.
+        Positive = DK is offering better-than-consensus price = real edge.
+        Returns 0.0 when no consensus data available.
+        """
+        cons = self.consensus_probs.get(side)
+        if cons is None:
+            return 0.0
+        return cons - _impl_prob(dk_odds)
 
 
 class OddsAPIClient:
@@ -92,20 +114,67 @@ class OddsAPIClient:
     def _raw_to_games(self, raw: list[dict], sport_key: str) -> list[OddsGame]:
         games: list[OddsGame] = []
         for item in raw:
+            home = item["home_team"]
+            away = item["away_team"]
             game = OddsGame(
                 game_id=item["id"],
                 sport=sport_key,
                 commence_time=datetime.fromisoformat(item["commence_time"].rstrip("Z")),
-                home_team=item["home_team"],
-                away_team=item["away_team"],
+                home_team=home,
+                away_team=away,
             )
-            # Extract only DraftKings markets
+
+            # Accumulators for consensus probability
+            h2h_home_probs:  list[float] = []
+            total_over_probs: list[float] = []
+            book_count = 0
+
             for bm in item.get("bookmakers", []):
-                if bm["key"] != TARGET_BOOK:
-                    continue
+                is_dk = bm["key"] == TARGET_BOOK
+                book_count += 1
+
                 for market in bm.get("markets", []):
-                    game.markets[market["key"]] = market["outcomes"]
-                break   # only one bookmaker we care about
+                    mkey     = market["key"]
+                    outcomes = market["outcomes"]
+
+                    # Always store DK markets for bet placement
+                    if is_dk:
+                        game.markets[mkey] = outcomes
+
+                    # Aggregate all books for consensus
+                    if mkey == "h2h" and len(outcomes) >= 2:
+                        h_out = next((o for o in outcomes if o.get("name") == home), None)
+                        a_out = next((o for o in outcomes if o.get("name") == away), None)
+                        if h_out and a_out:
+                            h_raw = _impl_prob(float(h_out["price"]))
+                            a_raw = _impl_prob(float(a_out["price"]))
+                            tot   = h_raw + a_raw
+                            if tot > 0:
+                                h2h_home_probs.append(h_raw / tot)
+
+                    elif mkey == "totals" and len(outcomes) >= 2:
+                        o_out = next((o for o in outcomes if o.get("name", "").lower() == "over"), None)
+                        u_out = next((o for o in outcomes if o.get("name", "").lower() == "under"), None)
+                        if o_out and u_out:
+                            o_raw = _impl_prob(float(o_out["price"]))
+                            u_raw = _impl_prob(float(u_out["price"]))
+                            tot   = o_raw + u_raw
+                            if tot > 0:
+                                total_over_probs.append(o_raw / tot)
+
+            game.n_books = book_count
+
+            # Compute no-vig consensus averages
+            if h2h_home_probs:
+                hp = sum(h2h_home_probs) / len(h2h_home_probs)
+                game.consensus_probs["home"] = round(hp, 4)
+                game.consensus_probs["away"] = round(1 - hp, 4)
+
+            if total_over_probs:
+                op = sum(total_over_probs) / len(total_over_probs)
+                game.consensus_probs["over"]  = round(op, 4)
+                game.consensus_probs["under"] = round(1 - op, 4)
+
             # Only include games where DraftKings has odds
             if game.markets:
                 games.append(game)
@@ -120,7 +189,7 @@ class OddsAPIClient:
         Fetch DraftKings odds for a sport.
         Returns cached data if already pulled today, unless force_refresh=True.
         """
-        cache_key = f"dk_odds_{sport_key}"
+        cache_key = f"dk_odds_v3_{sport_key}"   # v3: multi-book consensus
         if not force_refresh:
             cached = cache_load(cache_key)
             if cached is not None:
@@ -132,19 +201,21 @@ class OddsAPIClient:
                         home_team=g["home_team"],
                         away_team=g["away_team"],
                         markets=g["markets"],
+                        consensus_probs=g.get("consensus_probs", {}),
+                        n_books=g.get("n_books", 0),
                     )
                     for g in cached
                 ]
                 logger.info("Loaded %d %s games from daily cache", len(games), sport_key)
                 return games
 
-        # Fetch fresh from API
+        # Fetch fresh from API — all consensus books in one call (no extra credit cost)
         params = {
             "regions": REGIONS,
             "markets": ",".join(config.MARKETS),
             "oddsFormat": ODDS_FORMAT,
             "dateFormat": "iso",
-            "bookmakers": TARGET_BOOK,
+            "bookmakers": config.CONSENSUS_BOOKS,
         }
         raw = self._get(f"/sports/{sport_key}/odds", params)
         games = self._raw_to_games(raw, sport_key)
@@ -152,12 +223,14 @@ class OddsAPIClient:
         # Persist to daily cache as plain dicts
         serialisable = [
             {
-                "game_id": g.game_id,
-                "sport": g.sport,
-                "commence_time": g.commence_time.isoformat(),
-                "home_team": g.home_team,
-                "away_team": g.away_team,
-                "markets": g.markets,
+                "game_id":        g.game_id,
+                "sport":          g.sport,
+                "commence_time":  g.commence_time.isoformat(),
+                "home_team":      g.home_team,
+                "away_team":      g.away_team,
+                "markets":        g.markets,
+                "consensus_probs": g.consensus_probs,
+                "n_books":        g.n_books,
             }
             for g in games
         ]

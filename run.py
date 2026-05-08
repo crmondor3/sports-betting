@@ -60,13 +60,16 @@ class Pick:
     side: str
     line: float | None
     dk_odds: float      # American odds on DraftKings
-    model_prob: float
+    model_prob: float   # blended probability (consensus + ESPN)
     implied_prob: float
     ev_pct: float
     kelly_frac: float
     stake: float        # $ amount
     confidence: int     # 0-100
     matchup: MatchupPrediction = field(repr=False)
+    consensus_prob: float | None = None   # pure market consensus (no ESPN blend)
+    n_books: int = 0                      # books contributing to consensus
+    market_edge: float = 0.0             # consensus_prob - dk_implied (raw market edge)
 
     @property
     def game_label(self) -> str:
@@ -103,27 +106,30 @@ class Pick:
         edge_pct = round((self.model_prob - self.implied_prob) * 100, 1)
         ct_et = self.commence_time.replace(tzinfo=timezone.utc).astimezone(_ET)
         return {
-            "sport": self.sport,
-            "game_id": self.game_id,
-            "home_team": self.home_team,
-            "away_team": self.away_team,
+            "sport":           self.sport,
+            "game_id":         self.game_id,
+            "home_team":       self.home_team,
+            "away_team":       self.away_team,
             "commence_time_iso": self.commence_time.isoformat(),
-            "game": self.game_label,
-            "commence": ct_et.strftime("%m/%d ") + ct_et.strftime("%I:%M %p ET").lstrip("0"),
-            "bet_type": self.bet_type,
-            "side": self.side,
-            "bet_team": self.bet_team,
-            "line": self.line,
-            "dk_odds": self.dk_odds,
-            "model_prob": self.model_prob,
-            "implied_prob": self.implied_prob,
-            "edge_pct": edge_pct,
-            "ev_pct": self.ev_pct,
-            "kelly_frac": self.kelly_frac,
-            "stake": self.stake,
-            "confidence": self.confidence,
-            "signals": self._bet_signals(),
-            "data_quality": self.matchup.data_quality,
+            "game":            self.game_label,
+            "commence":        ct_et.strftime("%m/%d ") + ct_et.strftime("%I:%M %p ET").lstrip("0"),
+            "bet_type":        self.bet_type,
+            "side":            self.side,
+            "bet_team":        self.bet_team,
+            "line":            self.line,
+            "dk_odds":         self.dk_odds,
+            "model_prob":      self.model_prob,
+            "consensus_prob":  self.consensus_prob,
+            "n_books":         self.n_books,
+            "market_edge":     round(self.market_edge * 100, 2),  # as %
+            "implied_prob":    self.implied_prob,
+            "edge_pct":        edge_pct,
+            "ev_pct":          self.ev_pct,
+            "kelly_frac":      self.kelly_frac,
+            "stake":           self.stake,
+            "confidence":      self.confidence,
+            "signals":         self._bet_signals(),
+            "data_quality":    self.matchup.data_quality,
             "predicted_total": self.matchup.predicted_total,
         }
 
@@ -151,20 +157,38 @@ def analyse_game(
     matchup_data = espn.get_matchup(sport, game.home_team, game.away_team)
     prediction = analyzer.analyse(matchup_data)
 
-    home_prob = prediction.home_win_prob
-    away_prob = prediction.away_win_prob
+    espn_home_prob = prediction.home_win_prob
+    espn_away_prob = prediction.away_win_prob
+
+    # ── Blend: market consensus (65%) + ESPN model (35%) ──────────────────────
+    # When enough books have odds, the no-vig consensus is more accurate than
+    # our ESPN model alone. We blend rather than replace to retain ESPN's form /
+    # rest / H2H signals that pure odds markets sometimes misprice early.
+    cons_home = game.consensus_probs.get("home")
+    cons_away = game.consensus_probs.get("away")
+    n_books   = game.n_books
+
+    if cons_home and n_books >= config.MIN_BOOKS_FOR_CONSENSUS:
+        home_prob = 0.65 * cons_home + 0.35 * espn_home_prob
+        away_prob = 1.0 - home_prob
+    else:
+        home_prob = espn_home_prob
+        away_prob = espn_away_prob
+        cons_home = None   # mark as unavailable
+        cons_away = None
 
     # ── Moneyline ─────────────────────────────────────────────────────────────
     home_ml = game.get_line("h2h", game.home_team)
     away_ml = game.get_line("h2h", game.away_team)
 
     if home_ml and away_ml:
-        for side, model_p, dk_odds in [
-            ("home", home_prob, home_ml),
-            ("away", away_prob, away_ml),
+        for side, model_p, dk_odds, cons_p in [
+            ("home", home_prob, home_ml, cons_home),
+            ("away", away_prob, away_ml, cons_away),
         ]:
-            imp = implied_probability(dk_odds)
-            ev = calculate_ev(model_p, dk_odds) * 100
+            imp  = implied_probability(dk_odds)
+            ev   = calculate_ev(model_p, dk_odds) * 100
+            medge = game.market_edge(side, dk_odds)
             if ev >= config.EV_THRESHOLD * 100 and prediction.confidence >= config.MIN_CONFIDENCE:
                 picks.append(Pick(
                     sport=sport, game_id=game.game_id,
@@ -177,6 +201,9 @@ def analyse_game(
                     stake=stake_amount(bankroll, model_p, dk_odds),
                     confidence=prediction.confidence,
                     matchup=prediction,
+                    consensus_prob=cons_p,
+                    n_books=n_books,
+                    market_edge=medge,
                 ))
 
     # ── Spreads ───────────────────────────────────────────────────────────────
@@ -185,8 +212,9 @@ def analyse_game(
         if spread_info is None:
             continue
         point, dk_odds = spread_info
-        imp = implied_probability(dk_odds)
-        ev = calculate_ev(model_p, dk_odds) * 100
+        imp  = implied_probability(dk_odds)
+        ev   = calculate_ev(model_p, dk_odds) * 100
+        medge = game.market_edge(side, dk_odds)
         if ev >= config.EV_THRESHOLD * 100 and prediction.confidence >= config.MIN_CONFIDENCE:
             picks.append(Pick(
                 sport=sport, game_id=game.game_id,
@@ -199,23 +227,39 @@ def analyse_game(
                 stake=stake_amount(bankroll, model_p, dk_odds),
                 confidence=prediction.confidence,
                 matchup=prediction,
+                consensus_prob=None,
+                n_books=n_books,
+                market_edge=medge,
             ))
 
     # ── Totals ────────────────────────────────────────────────────────────────
     total_line = game.get_total_line()
     if total_line:
+        cons_over  = game.consensus_probs.get("over")
+        cons_under = game.consensus_probs.get("under")
         try:
             poisson_pred = poisson.predict(game.home_team, game.away_team, float(total_line))
         except Exception:
             poisson_pred = None
 
         if poisson_pred:
-            for name, model_p in [("over", poisson_pred.over_prob), ("under", poisson_pred.under_prob)]:
+            for name, poisson_p, cons_p in [
+                ("over",  poisson_pred.over_prob,  cons_over),
+                ("under", poisson_pred.under_prob, cons_under),
+            ]:
+                # Blend Poisson with consensus totals when available
+                if cons_p and n_books >= config.MIN_BOOKS_FOR_CONSENSUS:
+                    model_p = 0.65 * cons_p + 0.35 * poisson_p
+                else:
+                    model_p = poisson_p
+                    cons_p  = None
+
                 dk_odds = game.get_line("totals", name.capitalize())
                 if not dk_odds:
                     continue
-                imp = implied_probability(dk_odds)
-                ev = calculate_ev(model_p, dk_odds) * 100
+                imp  = implied_probability(dk_odds)
+                ev   = calculate_ev(model_p, dk_odds) * 100
+                medge = game.market_edge(name, dk_odds)
                 if ev >= config.EV_THRESHOLD * 100 and prediction.confidence >= config.MIN_CONFIDENCE:
                     picks.append(Pick(
                         sport=sport, game_id=game.game_id,
@@ -228,6 +272,9 @@ def analyse_game(
                         stake=stake_amount(bankroll, model_p, dk_odds),
                         confidence=prediction.confidence,
                         matchup=prediction,
+                        consensus_prob=cons_p,
+                        n_books=n_books,
+                        market_edge=medge,
                     ))
 
     return picks

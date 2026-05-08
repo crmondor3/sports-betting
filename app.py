@@ -132,7 +132,7 @@ _BASE_BANKROLL = 100.0  # All performance tracking starts from this baseline
 def _init_state():
     defaults = {
         "sport":       "All",
-        "ev_min":      20.0,
+        "ev_min":      3.0,
         "ev_min_odds": -250,
         "ev_max_odds":  400,
         "bankroll":    _BASE_BANKROLL,
@@ -336,19 +336,34 @@ else:
     try:
         _all_dicts, _ev_stats, _api_rem = _run_ev_pipeline(sport_arg, _KELLY, bankroll_val)
 
-        # Stale cache guard
-        if _all_dicts and "game_id" not in _all_dicts[0]:
+        # Stale cache guard — bust if missing new fields
+        if _all_dicts and ("game_id" not in _all_dicts[0] or "n_books" not in _all_dicts[0]):
             st.cache_data.clear()
             st.rerun()
 
-        # Apply calibration (always fresh — calibrator is session-scoped)
+        # Apply calibration + multi-signal Kelly scaling
         for _pd in _all_dicts:
-            _adj_p  = _calibrator.calibrate_prob(_pd["model_prob"], _pd["sport"], _pd["bet_type"])
-            _km     = _calibrator.kelly_multiplier(_pd["sport"])
+            _adj_p = _calibrator.calibrate_prob(_pd["model_prob"], _pd["sport"], _pd["bet_type"])
+            _km    = _calibrator.kelly_multiplier(_pd["sport"])
+
+            # Book-count confidence: more books agreeing = more sizing confidence
+            _nb = _pd.get("n_books", 0)
+            _book_mult = (
+                min(1.0 + (_nb - config.MIN_BOOKS_FOR_CONSENSUS) * 0.05, 1.25)
+                if _nb >= config.MIN_BOOKS_FOR_CONSENSUS else 0.75
+            )
+
+            # Injury fade: if the BET SIDE team has OUT players, reduce stake 40%
+            from data.news_monitor import injuries_for_teams as _inj2
+            _h_inj, _a_inj = _inj2(_pd["home_team"], _pd["away_team"], _injury_map)
+            _bet_inj = _h_inj if _pd["side"] in ("home", "over", "under") else _a_inj
+            _inj_mult = 0.60 if any(i["status"].lower() == "out" for i in _bet_inj) else 1.0
+
+            _final_km = _km * _book_mult * _inj_mult
             _pd["model_prob"]  = _adj_p
             _pd["ev_pct"]      = _cev(_adj_p, _pd["dk_odds"]) * 100
-            _pd["kelly_frac"]  = _kf(_adj_p, _pd["dk_odds"], _KELLY * _km)
-            _pd["_kelly_mult"] = _km
+            _pd["kelly_frac"]  = _kf(_adj_p, _pd["dk_odds"], _KELLY * _final_km)
+            _pd["_kelly_mult"] = _final_km
 
         # Auto-log all picks to DB (idempotent — skips already-logged game+type+side)
         _n_new = _auto_log_model_picks(_all_dicts, bankroll_val, _KELLY)
@@ -495,6 +510,28 @@ if page == "EV Picks":
                         + f'&nbsp;&nbsp;{_inj_detail}</div>'
                     )
 
+                # Market edge and consensus display
+                _medge     = _p.get("market_edge", 0.0)   # already in %
+                _cons_p    = _p.get("consensus_prob")
+                _nb        = _p.get("n_books", 0)
+                _medge_col = "#00e676" if _medge > 0 else "#ff5252"
+                _cons_html = ""
+                if _cons_p:
+                    _cons_vs_dk = _medge
+                    _cons_html  = (
+                        f'<div style="margin-top:4px;font-size:0.8rem;color:#90a4ae;">'
+                        f'Consensus ({_nb} books): <b style="color:#90caf9;">{_cons_p:.1%}</b>'
+                        f' &nbsp;·&nbsp; DK implied: {_p["implied_prob"]:.1%}'
+                        f' &nbsp;·&nbsp; Market edge: <b style="color:{_medge_col};">{_cons_vs_dk:+.1f}%</b>'
+                        f'</div>'
+                    )
+                else:
+                    _cons_html = (
+                        f'<div style="margin-top:4px;font-size:0.75rem;color:#546e7a;">'
+                        f'ESPN model only ({_nb} book{"s" if _nb != 1 else ""}) — '
+                        f'lower confidence without market consensus</div>'
+                    )
+
                 st.markdown(f"""
 <div class="{_card_cls}">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
@@ -513,10 +550,11 @@ if page == "EV Picks":
     </div>
   </div>
   {_inj_html}
+  {_cons_html}
 
   <div style="margin-top:10px;padding:8px 12px;background:#0d1520;border-radius:6px;font-size:0.9rem;color:#cfd8dc;">
     Betting <b style="color:#fff;">{_bteam}</b> ({_blbl} {_sdisp} @ <b style="color:{_ev_col};">{_odds_s}</b>).
-    Model: <b style="color:{_ev_col};">{_prob:.1%}</b> win vs book's {_p['implied_prob']:.1%} implied.
+    Blended prob: <b style="color:{_ev_col};">{_prob:.1%}</b> vs DK implied {_p['implied_prob']:.1%}.
     Edge: <b style="color:{_ev_col};">+{_edge:.1f}%</b>
   </div>
 
@@ -527,24 +565,24 @@ if page == "EV Picks":
       <div style="font-size:0.85rem;color:#b0bec5;">{_blbl} &nbsp;{_sdisp}</div>
     </div>
     <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">EV</div>
-      <div style="font-size:1.6rem;font-weight:900;color:{_ev_col};">{_ev:+.1f}%</div>
-      <div style="font-size:0.8rem;color:#b0bec5;">expected value</div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Market Edge</div>
+      <div style="font-size:1.6rem;font-weight:900;color:{_medge_col};">{_medge:+.1f}%</div>
+      <div style="font-size:0.8rem;color:#b0bec5;">consensus vs DK</div>
     </div>
     <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Odds</div>
-      <div style="font-size:1.4rem;font-weight:800;color:#ffffff;">{_odds_s}</div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">EV (blended)</div>
+      <div style="font-size:1.4rem;font-weight:800;color:{_ev_col};">{_ev:+.1f}%</div>
       <div style="font-size:0.8rem;color:#b0bec5;">+${_payout:.0f} per $100</div>
     </div>
     <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Model vs Book</div>
-      <div style="font-size:1.15rem;font-weight:700;color:{_ev_col};">{_prob:.1%}</div>
-      <div style="font-size:0.85rem;color:#b0bec5;">implied: {_p['implied_prob']:.1%}</div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">DK Odds</div>
+      <div style="font-size:1.4rem;font-weight:800;color:#ffffff;">{_odds_s}</div>
+      <div style="font-size:0.8rem;color:#b0bec5;">implied {_p['implied_prob']:.1%}</div>
     </div>
     <div>
       <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Stake (Kelly)</div>
       <div style="font-size:1.25rem;font-weight:800;color:#ffffff;">${_stake:.2f}</div>
-      <div style="font-size:0.85rem;color:#b0bec5;">{_frac:.1%} · {_km:.0%} confidence</div>
+      <div style="font-size:0.85rem;color:#b0bec5;">{_frac:.1%} · {_km:.0%} conf</div>
     </div>
     <div>
       <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Bet-To Line</div>
@@ -552,10 +590,9 @@ if page == "EV Picks":
       <div style="font-size:0.8rem;color:#b0bec5;">no edge below this</div>
     </div>
     <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Confidence</div>
-      <div style="font-size:1.15rem;font-weight:700;color:{_conf_color(_conf)};">
-        {_conf}/100 <span style="font-size:0.8rem;color:#b0bec5;">({_conf_label(_conf)})</span>
-      </div>
+      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Books / Confidence</div>
+      <div style="font-size:1.15rem;font-weight:700;color:{_conf_color(_conf)};">{_nb} books</div>
+      <div style="font-size:0.8rem;color:#b0bec5;">{_conf}/100 · {_conf_label(_conf)}</div>
     </div>
   </div>
 
