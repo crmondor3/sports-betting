@@ -613,9 +613,12 @@ elif page == "Bankroll":
         _mbets = (
             _bs.query(_BetM)
             .filter(_BetM.settled == True)
-            .order_by(_BetM.settled_at)
             .all()
         )
+    # Sort by effective date: settled_at → placed_at → commence_time → epoch
+    def _bet_date(b) -> datetime:
+        return b.settled_at or b.placed_at or b.commence_time or datetime(2000, 1, 1)
+    _mbets = sorted(_mbets, key=_bet_date)
 
     # ── Header KPIs ────────────────────────────────────────────────────────────
     _total_pnl  = sum(b.pnl_kelly or 0 for b in _mbets)
@@ -672,10 +675,9 @@ elif page == "Bankroll":
     _daily_pnl: dict = _dd(float)
     _daily_bets: dict = _dd(list)
     for b in _mbets:
-        if b.settled_at:
-            _d = b.settled_at.date()
-            _daily_pnl[_d] += (b.pnl_kelly or 0)
-            _daily_bets[_d].append(b)
+        _d = _bet_date(b).date()
+        _daily_pnl[_d] += (b.pnl_kelly or 0)
+        _daily_bets[_d].append(b)
 
     _running = _BASE_BANKROLL
     _daily_rows = []
