@@ -34,7 +34,7 @@ ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 TARGET_BOOK = "draftkings"
 
 # All US books fetched for consensus probability (same API credit cost as single book)
-CONSENSUS_BOOKS = "draftkings,fanduel,betmgm,caesars,betrivers,williamhill_us,pointsbetus,espnbet"
+CONSENSUS_BOOKS = "draftkings,fanduel,betmgm,caesars,betrivers,williamhill_us"
 
 # Minimum books needed to trust consensus over ESPN model
 MIN_BOOKS_FOR_CONSENSUS = 3

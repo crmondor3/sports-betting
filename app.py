@@ -132,7 +132,7 @@ _BASE_BANKROLL = 100.0  # All performance tracking starts from this baseline
 def _init_state():
     defaults = {
         "sport":       "All",
-        "ev_min":      3.0,
+        "ev_min":      20.0,
         "ev_min_odds": -250,
         "ev_max_odds":  400,
         "bankroll":    _BASE_BANKROLL,
