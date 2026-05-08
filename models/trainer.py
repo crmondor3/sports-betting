@@ -57,6 +57,18 @@ def _model_path(sport: str) -> Path:
     return _CACHE_DIR / f"trained_{sport.lower()}.pkl"
 
 
+class _Calibrated:
+    """Wraps a GBM + IsotonicRegression into a predict_proba interface. Module-level so pickle works."""
+    def __init__(self, gb, ir):
+        self.gb = gb
+        self.ir = ir
+
+    def predict_proba(self, X):
+        raw = self.gb.predict_proba(X)[:, 1]
+        cal = self.ir.predict(raw)
+        return np.column_stack([1 - cal, cal])
+
+
 # ── Feature computation ────────────────────────────────────────────────────────
 
 def _build_features(games: list[dict], sport: str) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
@@ -213,18 +225,11 @@ def train(
     )
     gb.fit(X_tr_s, y_tr)
 
-    # Manual isotonic calibration — avoids sklearn API version issues with cv="prefit"
+    # Manual isotonic calibration on holdout — avoids sklearn cv="prefit" API version issues
     raw_te = gb.predict_proba(X_te_s)[:, 1]
     ir = IsotonicRegression(out_of_bounds="clip")
     ir.fit(raw_te, y_te)
-
-    class _Calibrated:
-        def predict_proba(self, X):
-            raw = gb.predict_proba(X)[:, 1]
-            cal = ir.predict(raw)
-            return np.column_stack([1 - cal, cal])
-
-    cal = _Calibrated()
+    cal = _Calibrated(gb, ir)
 
     proba = cal.predict_proba(X_te_s)[:, 1]
     bs    = brier_score_loss(y_te, proba)
