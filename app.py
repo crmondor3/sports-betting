@@ -32,6 +32,17 @@ from data.daily_cache import bust_all, is_cached
 
 init_db()
 
+# ── Start background scheduler (once per server process) ─────────────────────
+if "scheduler_started" not in st.session_state:
+    try:
+        from data.scheduler import add_ml_update_job, add_weekly_retrain_job, start as _sched_start
+        add_ml_update_job(hour=3, minute=0)
+        add_weekly_retrain_job(day_of_week=6, hour=4, minute=0)
+        _sched_start()
+    except Exception:
+        pass
+    st.session_state["scheduler_started"] = True
+
 # ── Auto-settle completed games once per session ──────────────────────────────
 if "auto_settled_done" not in st.session_state:
     try:
@@ -281,16 +292,22 @@ with st.sidebar:
     except Exception:
         pass
 
-    # Show calibration status
+    # Show calibration / self-learning status
     _cal = _calibrator
     if _cal.n_settled >= 10:
-        st.success(f"Model calibrated · {_cal.n_settled} settled bets")
+        st.success(f"Self-learning active · {_cal.n_settled} settled bets")
         if _cal.brier_score:
-            st.caption(f"Brier: {_cal.brier_score:.4f} · {_cal.model_quality_label()}")
+            _brier_line = f"Brier: {_cal.brier_score:.4f} · {_cal.model_quality_label()}"
+            if _cal.brier_improvement > 0:
+                _brier_line += f" · IR improved {_cal.brier_improvement:.1f}%"
+            st.caption(_brier_line)
+        if _cal.using_isotonic:
+            st.caption("Isotonic calibration active (non-linear learning)")
+        st.caption("Auto-updates: nightly 3 AM · retrain Sundays 4 AM")
     elif _cal.n_settled > 0:
-        st.info(f"Calibrating… {_cal.n_settled}/10 bets settled")
+        st.info(f"Calibrating… {_cal.n_settled}/20 bets (isotonic activates at 20)")
     else:
-        st.caption("Calibration active after 10 settled bets.")
+        st.caption("Self-learning activates after first settled bets.")
 
     st.divider()
     # API key status — most common reason buttons don't work
