@@ -174,7 +174,7 @@ def train(
     """
     from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.preprocessing import StandardScaler
-    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.isotonic import IsotonicRegression
     from sklearn.metrics import brier_score_loss, log_loss as sk_log_loss
 
     if len(games) < _MIN_GAMES:
@@ -213,9 +213,18 @@ def train(
     )
     gb.fit(X_tr_s, y_tr)
 
-    # Isotonic calibration on holdout — cv="prefit" requires ensemble=False in sklearn 1.4+
-    cal = CalibratedClassifierCV(estimator=gb, method="isotonic", cv="prefit", ensemble=False)
-    cal.fit(X_te_s, y_te)
+    # Manual isotonic calibration — avoids sklearn API version issues with cv="prefit"
+    raw_te = gb.predict_proba(X_te_s)[:, 1]
+    ir = IsotonicRegression(out_of_bounds="clip")
+    ir.fit(raw_te, y_te)
+
+    class _Calibrated:
+        def predict_proba(self, X):
+            raw = gb.predict_proba(X)[:, 1]
+            cal = ir.predict(raw)
+            return np.column_stack([1 - cal, cal])
+
+    cal = _Calibrated()
 
     proba = cal.predict_proba(X_te_s)[:, 1]
     bs    = brier_score_loss(y_te, proba)
