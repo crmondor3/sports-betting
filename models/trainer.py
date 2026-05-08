@@ -213,8 +213,8 @@ def train(
     )
     gb.fit(X_tr_s, y_tr)
 
-    # Isotonic calibration on holdout — critical for accurate probabilities
-    cal = CalibratedClassifierCV(gb, method="isotonic", cv="prefit")
+    # Isotonic calibration on holdout — cv="prefit" requires ensemble=False in sklearn 1.4+
+    cal = CalibratedClassifierCV(estimator=gb, method="isotonic", cv="prefit", ensemble=False)
     cal.fit(X_te_s, y_te)
 
     proba = cal.predict_proba(X_te_s)[:, 1]
