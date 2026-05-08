@@ -92,42 +92,52 @@ def run_backfill(
                     continue
 
                 home_prob = pred.home_win_prob
-                won       = bool(g["home_winner"])
-                pnl       = round(_SYNTH_STAKE * (_SYNTH_DECIMAL - 1), 4) if won else -_SYNTH_STAKE
+                away_prob = 1.0 - home_prob
+                home_won  = bool(g["home_winner"])
 
                 try:
                     ct = datetime.fromisoformat(g["date"].rstrip("Z"))
                 except Exception:
                     ct = datetime.combine(gdate, datetime.min.time())
 
-                bet = Bet(
-                    sport            = sport_label,
-                    game_id          = synthetic_id,
-                    home_team        = home,
-                    away_team        = away,
-                    commence_time    = ct,
-                    bet_type         = "moneyline",
-                    side             = "home",
-                    line             = None,
-                    bookmaker        = _SYNTH_BOOK,
-                    odds             = _SYNTH_ODDS,
-                    model_prob       = round(home_prob, 4),
-                    implied_prob     = round(_SYNTH_IMPLIED, 4),
-                    ev_pct           = round(calculate_ev(home_prob, _SYNTH_ODDS) * 100, 2),
-                    kelly_frac       = round(kelly_fraction(home_prob, _SYNTH_ODDS, 0.25), 4),
-                    stake_kelly      = _SYNTH_STAKE,
-                    stake_flat       = _SYNTH_STAKE,
-                    bankroll_at_bet  = 100.0,
-                    settled          = True,
-                    won              = won,
-                    pnl_kelly        = pnl,
-                    pnl_flat         = pnl,
-                    settled_at       = ct,
-                    auto_tracked     = True,
-                )
-                new_rows.append(bet)
-                existing.add(key)
-                inserted += 1
+                # Record BOTH sides so the calibrator sees the full probability
+                # distribution — not just the "looked good" side.
+                for side, model_p, won in [
+                    ("home", home_prob, home_won),
+                    ("away", away_prob, not home_won),
+                ]:
+                    side_key = (synthetic_id, "moneyline", side)
+                    if side_key in existing:
+                        continue
+                    pnl = round(_SYNTH_STAKE * (_SYNTH_DECIMAL - 1), 4) if won else -_SYNTH_STAKE
+                    bet = Bet(
+                        sport            = sport_label,
+                        game_id          = synthetic_id,
+                        home_team        = home,
+                        away_team        = away,
+                        commence_time    = ct,
+                        bet_type         = "moneyline",
+                        side             = side,
+                        line             = None,
+                        bookmaker        = _SYNTH_BOOK,
+                        odds             = _SYNTH_ODDS,
+                        model_prob       = round(model_p, 4),
+                        implied_prob     = round(_SYNTH_IMPLIED, 4),
+                        ev_pct           = round(calculate_ev(model_p, _SYNTH_ODDS) * 100, 2),
+                        kelly_frac       = round(kelly_fraction(model_p, _SYNTH_ODDS, 0.25), 4),
+                        stake_kelly      = _SYNTH_STAKE,
+                        stake_flat       = _SYNTH_STAKE,
+                        bankroll_at_bet  = 100.0,
+                        settled          = True,
+                        won              = won,
+                        pnl_kelly        = pnl,
+                        pnl_flat         = pnl,
+                        settled_at       = ct,
+                        auto_tracked     = True,
+                    )
+                    new_rows.append(bet)
+                    existing.add(side_key)
+                    inserted += 1
 
         _log(f"{sport_label}: {inserted} historical bets added")
 

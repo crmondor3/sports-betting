@@ -148,14 +148,18 @@ _init_state()
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _run_ev_pipeline(sport_filter, kelly_frac, bankroll):
-    """Fetch all +EV candidates (1% floor) — filtering/ranking done in the UI."""
+    """
+    Fetch ALL model predictions with no EV floor — display filtering happens in the UI.
+    Logging everything to DB gives the calibrator unbiased training data across the
+    full probability distribution, not just cherry-picked high-EV picks.
+    """
     from run import run_pipeline
     import config as cfg
-    cfg.EV_THRESHOLD           = 0.01   # broad net; UI applies the real floor
+    cfg.EV_THRESHOLD           = -1.0   # no floor — log everything for calibration
     cfg.DEFAULT_KELLY_FRACTION = kelly_frac
     cfg.STARTING_BANKROLL      = bankroll
     cfg.MIN_CONFIDENCE         = 0
-    cfg.MAX_PICKS_PER_DAY      = 60
+    cfg.MAX_PICKS_PER_DAY      = 500    # capture all games across all sports
     picks, stats, api_rem = run_pipeline(sport_filter or None)
     return [p.to_dict() for p in picks], stats, api_rem
 
