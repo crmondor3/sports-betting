@@ -365,32 +365,30 @@ if page == "EV Picks":
     ]
     _upcoming   = sorted(
         [p for p in _qualifying if _commence_dt(p) > _now],
-        key=lambda p: p["ev_pct"], reverse=True
+        key=lambda p: _commence_dt(p)   # soonest first
     )
     _started    = sorted(
         [p for p in _qualifying if _commence_dt(p) <= _now],
         key=lambda p: _commence_dt(p)
     )
 
-    _top_10 = _upcoming[:10]
-
     # ── KPI row ────────────────────────────────────────────────────────────────
     _kc1, _kc2, _kc3, _kc4 = st.columns(4)
-    _kc1.metric("Active Picks", f"{len(_top_10)} / 10")
+    _kc1.metric("Active Picks", len(_upcoming))
     _kc2.metric("Completed Today", len(_started))
     _kc3.metric(
         "Avg EV",
-        f"{sum(p['ev_pct'] for p in _top_10)/len(_top_10):.1f}%" if _top_10 else "—",
+        f"{sum(p['ev_pct'] for p in _upcoming)/len(_upcoming):.1f}%" if _upcoming else "—",
     )
     _kc4.metric("API Requests Left", _api_rem if _api_rem is not None else "cached")
 
     _tab_active, _tab_done = st.tabs(
-        [f"Active ({len(_top_10)})", f"Completed Today ({len(_started)})"]
+        [f"Active ({len(_upcoming)})", f"Completed Today ({len(_started)})"]
     )
 
     # ═══════ ACTIVE TAB ════════════════════════════════════════════════════════
     with _tab_active:
-        if not _top_10:
+        if not _upcoming:
             st.warning(
                 "No qualifying EV picks for upcoming games right now. "
                 "Try lowering Min EV% or widening the odds range in the sidebar."
@@ -399,14 +397,7 @@ if page == "EV Picks":
                 "New games are added daily — check back after 7 AM ET for the next batch."
             )
         else:
-            if len(_upcoming) < 10:
-                st.info(
-                    f"Found {len(_upcoming)} qualifying bet(s) today — "
-                    f"{10 - len(_upcoming)} short of the target 10. "
-                    "Lower Min EV% to surface more candidates."
-                )
-
-            for _i, _p in enumerate(_top_10, 1):
+            for _i, _p in enumerate(_upcoming, 1):
                 _ev      = _p["ev_pct"]
                 _prob    = _p["model_prob"]
                 _conf    = _p["confidence"]
