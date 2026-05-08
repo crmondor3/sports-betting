@@ -36,7 +36,10 @@ init_db()
 if "auto_settled_done" not in st.session_state:
     try:
         from tracker.auto_settle import auto_settle
+        from tracker.bankroll import BankrollTracker as _BRT
         n = auto_settle()
+        if n > 0:
+            _BRT().auto_backup()  # persist immediately after any settlement
         st.session_state["auto_settled_done"] = True
         st.session_state["auto_settled_count"] = n
         if n > 0 and "calibrator" in st.session_state:
@@ -278,6 +281,26 @@ with st.sidebar:
         st.rerun()
 
     st.caption("Cache refreshes automatically at 7 AM ET daily.")
+
+    st.divider()
+    st.markdown("### Calibration Training")
+    st.caption("Seed model with last 30 days of ESPN results for faster calibration.")
+    if st.button("Run 30-Day Backfill", use_container_width=True,
+                 help="Fetches completed games from ESPN, runs model predictions, inserts settled training bets. Takes ~1 min."):
+        from data.historical_backfill import run_backfill
+        _prog = st.empty()
+        with st.spinner("Fetching ESPN historical results…"):
+            _n = run_backfill(days=30, progress_cb=lambda m: _prog.caption(m))
+        _prog.empty()
+        if _n > 0:
+            st.success(f"Added {_n} historical bets — rebuilding calibrator…")
+            if "calibrator" in st.session_state:
+                del st.session_state["calibrator"]
+            from tracker.bankroll import BankrollTracker as _BRT2
+            _BRT2().auto_backup()
+            st.rerun()
+        else:
+            st.info("No new historical bets to add (already up to date).")
 
 
 # ── Active session values ──────────────────────────────────────────────────────

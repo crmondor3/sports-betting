@@ -320,6 +320,60 @@ class ESPNClient:
 
         return h2h
 
+    # ── Public: scoreboard by date ───────────────────────────────────────────
+
+    def get_scoreboard(self, sport: str, game_date: date) -> list[dict]:
+        """
+        Return completed games for a sport on a given calendar date.
+        Each dict has: event_id, date, home_team, away_team, home_score,
+        away_score, home_winner.
+        Results are cached so the same date is only fetched once.
+        """
+        cache_key = f"espn_scoreboard_{sport}_{game_date.isoformat()}"
+        cached = cache_load(cache_key)
+        if cached is not None:
+            return cached
+
+        sport_slug, league_slug = SPORT_MAP.get(sport.upper(), ("", ""))
+        if not sport_slug:
+            return []
+
+        url = f"{ESPN_BASE}/{sport_slug}/{league_slug}/scoreboard"
+        try:
+            data = self._get(url, {"dates": game_date.strftime("%Y%m%d"), "limit": 100})
+        except Exception as exc:
+            logger.warning("ESPN scoreboard failed %s %s: %s", sport, game_date, exc)
+            return []
+
+        games = []
+        for ev in data.get("events", []):
+            comps = ev.get("competitions", [{}])
+            if not comps:
+                continue
+            comp = comps[0]
+            if not comp.get("status", {}).get("type", {}).get("completed", False):
+                continue
+            competitors = comp.get("competitors", [])
+            if len(competitors) < 2:
+                continue
+            home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+            away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+            if not home or not away:
+                continue
+            games.append({
+                "event_id":   ev.get("id", ""),
+                "date":       ev.get("date", game_date.isoformat()),
+                "home_team":  home.get("team", {}).get("displayName", ""),
+                "away_team":  away.get("team", {}).get("displayName", ""),
+                "home_score": _to_int(home.get("score", "0")),
+                "away_score": _to_int(away.get("score", "0")),
+                "home_winner": home.get("winner", False),
+            })
+
+        cache_save(cache_key, games)
+        logger.info("ESPN scoreboard %s %s: %d completed games", sport, game_date, len(games))
+        return games
+
     # ── Public: full matchup ──────────────────────────────────────────────────
 
     def get_matchup(self, sport: str, home_team: str, away_team: str) -> MatchupData:

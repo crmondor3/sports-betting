@@ -96,6 +96,7 @@ class BankrollTracker:
                 bet.clv = closing_line_value(bet.odds, closing_odds) * 100
 
         logger.info("Settled bet #%d — won=%s P&L Kelly $%.2f", bet_id, won, pnl_kelly)
+        self.auto_backup()
 
     # ── Bankroll query ─────────────────────────────────────────────────────────
 
@@ -161,9 +162,11 @@ class BankrollTracker:
 
         out = Path(path)
         fieldnames = [
-            "id", "placed_at", "sport", "home_team", "away_team", "bet_type", "side",
-            "line", "bookmaker", "odds", "model_prob", "implied_prob", "ev_pct",
-            "stake_kelly", "stake_flat", "won", "pnl_kelly", "pnl_flat", "clv",
+            "id", "placed_at", "sport", "game_id", "home_team", "away_team",
+            "commence_time", "bet_type", "side", "line", "bookmaker", "odds",
+            "model_prob", "implied_prob", "ev_pct", "kelly_frac",
+            "stake_kelly", "stake_flat", "bankroll_at_bet",
+            "settled", "won", "pnl_kelly", "pnl_flat", "settled_at", "clv",
         ]
         with out.open("w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -173,6 +176,14 @@ class BankrollTracker:
 
         logger.info("Exported %d bets to %s", len(bets), out)
         return out
+
+    def auto_backup(self) -> None:
+        """Write all bets to cache/bets_backup.csv. Called after every settlement."""
+        try:
+            backup_path = Path(__file__).parent.parent / "cache" / "bets_backup.csv"
+            self.export_csv(backup_path)
+        except Exception as exc:
+            logger.warning("Auto-backup failed: %s", exc)
 
     def delete_bet(self, bet_id: int) -> None:
         """Permanently remove a bet record."""
