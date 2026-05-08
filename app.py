@@ -313,6 +313,15 @@ odds_hi       = st.session_state["ev_max_odds"]
 from models.kelly_criterion import kelly_fraction as _kf
 from models.ev_calculator import american_to_decimal as _a2d, decimal_to_american as _d2a, calculate_ev as _cev
 
+# ── Injury monitor — fetched once per session, cached daily ───────────────────
+if "injury_map" not in st.session_state:
+    try:
+        from data.news_monitor import fetch_all_injuries
+        st.session_state["injury_map"] = fetch_all_injuries()
+    except Exception:
+        st.session_state["injury_map"] = {}
+_injury_map = st.session_state["injury_map"]
+
 # ── Pipeline: runs on every page load; cached so subsequent calls are instant ──
 # Picks are auto-logged here, not on any specific page, so the bankroll is always
 # up to date regardless of which tab the user visits first.
@@ -420,6 +429,7 @@ if page == "EV Picks":
                 "New games are added daily — check back after 7 AM ET for the next batch."
             )
         else:
+            from data.news_monitor import injuries_for_teams as _inj_for
             for _i, _p in enumerate(_upcoming, 1):
                 _ev      = _p["ev_pct"]
                 _prob    = _p["model_prob"]
@@ -449,6 +459,42 @@ if page == "EV Picks":
                              else "bet-card bet-card-med" if _ev >= 5
                              else "bet-card bet-card-low")
 
+                # Injury lookup for both teams
+                _h_inj, _a_inj = _inj_for(_p["home_team"], _p["away_team"], _injury_map)
+                _all_inj = [
+                    *[(i, "home") for i in _h_inj],
+                    *[(i, "away") for i in _a_inj],
+                ]
+                _inj_html = ""
+                if _all_inj:
+                    _out_count = sum(1 for i, _ in _all_inj if i["status"].lower() == "out")
+                    _gtd_count = len(_all_inj) - _out_count
+                    _inj_parts = []
+                    if _out_count:
+                        _inj_parts.append(
+                            f'<span style="background:#ff525222;color:#ff5252;border:1px solid #ff5252;'
+                            f'padding:1px 8px;border-radius:12px;font-size:0.75rem;font-weight:700;">'
+                            f'{_out_count} OUT</span>'
+                        )
+                    if _gtd_count:
+                        _inj_parts.append(
+                            f'<span style="background:#ffeb3b22;color:#ffeb3b;border:1px solid #ffeb3b;'
+                            f'padding:1px 8px;border-radius:12px;font-size:0.75rem;font-weight:700;">'
+                            f'{_gtd_count} GTD</span>'
+                        )
+                    _inj_detail = " &nbsp;".join(
+                        f'<span style="color:#b0bec5;font-size:0.75rem;">'
+                        f'{i["player"]} ({i["position"]}) {i["status"]}</span>'
+                        for i, _ in _all_inj[:4]
+                    )
+                    _inj_html = (
+                        f'<div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">'
+                        f'<span style="color:#78909c;font-size:0.7rem;text-transform:uppercase;'
+                        f'letter-spacing:1px;">Injuries</span>'
+                        + " ".join(_inj_parts)
+                        + f'&nbsp;&nbsp;{_inj_detail}</div>'
+                    )
+
                 st.markdown(f"""
 <div class="{_card_cls}">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
@@ -466,6 +512,7 @@ if page == "EV Picks":
       <span style="font-size:2rem;font-weight:900;color:{_ev_col};">{_ev:+.1f}% EV</span>
     </div>
   </div>
+  {_inj_html}
 
   <div style="margin-top:10px;padding:8px 12px;background:#0d1520;border-radius:6px;font-size:0.9rem;color:#cfd8dc;">
     Betting <b style="color:#fff;">{_bteam}</b> ({_blbl} {_sdisp} @ <b style="color:{_ev_col};">{_odds_s}</b>).
@@ -646,7 +693,14 @@ elif page == "Bankroll":
     with _bss() as _bs2:
         _open_count = _bs2.query(_BetM).filter(_BetM.settled == False).count()
 
-    _br_col = "#00e676" if _model_br >= _BASE_BANKROLL else "#ff5252"
+    # CLV metrics — the real long-term edge indicator
+    _clv_bets   = [b for b in _mbets if b.clv is not None]
+    _avg_clv    = sum(b.clv for b in _clv_bets) / len(_clv_bets) if _clv_bets else None
+    _beat_close = sum(1 for b in _clv_bets if b.clv > 0) / len(_clv_bets) if _clv_bets else None
+
+    _br_col  = "#00e676" if _model_br >= _BASE_BANKROLL else "#ff5252"
+    _clv_col = ("#00e676" if (_avg_clv or 0) > 0 else "#ff5252") if _avg_clv is not None else "#78909c"
+
     st.markdown(f"""
 <div style="background:#0d1520;border-radius:12px;padding:20px 24px;margin-bottom:20px;
             display:flex;gap:32px;flex-wrap:wrap;align-items:center;">
@@ -660,13 +714,19 @@ elif page == "Bankroll":
     <div style="font-size:1.8rem;font-weight:800;color:{_br_col};">{_total_ret:+.1f}%</div>
   </div>
   <div>
+    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Avg CLV</div>
+    <div style="font-size:1.8rem;font-weight:800;color:{_clv_col};">{"—" if _avg_clv is None else f"{_avg_clv:+.2f}%"}</div>
+    <div style="color:#78909c;font-size:0.8rem;">{"closing line value" if _avg_clv is not None else f"need {max(0,5-len(_clv_bets))} more CLV samples"}</div>
+  </div>
+  <div>
+    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Beat Close %</div>
+    <div style="font-size:1.6rem;font-weight:800;color:{_clv_col};">{"—" if _beat_close is None else f"{_beat_close:.0%}"}</div>
+    <div style="color:#78909c;font-size:0.8rem;">{len(_clv_bets)} CLV samples</div>
+  </div>
+  <div>
     <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Hit Rate</div>
     <div style="font-size:1.6rem;font-weight:800;color:#cfd8dc;">{_hit_m:.1%}</div>
     <div style="color:#78909c;font-size:0.8rem;">{_wins_m}W – {len(_mbets)-_wins_m}L</div>
-  </div>
-  <div>
-    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Avg EV / Pick</div>
-    <div style="font-size:1.6rem;font-weight:800;color:#cfd8dc;">{_avg_ev_m:+.1f}%</div>
   </div>
   <div>
     <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Settled / Open</div>
@@ -754,6 +814,92 @@ elif page == "Bankroll":
         _ddf_disp["Daily %"] = _ddf_disp["Daily %"].map(lambda x: f"{x:+.2f}%")
         _ddf_disp["Bankroll"]= _ddf_disp["Bankroll"].map(lambda x: f"${x:,.2f}")
         st.dataframe(_ddf_disp, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── CLV Analysis — the real edge indicator ────────────────────────────────
+    st.subheader("Closing Line Value (CLV)")
+    st.caption(
+        "CLV measures whether you got a better price than the market's closing line. "
+        "Consistently positive CLV is the only proven leading indicator of long-term edge — "
+        "independent of short-term win/loss variance."
+    )
+
+    if not _clv_bets:
+        st.info(
+            "No CLV data yet. The model captures closing DK odds within 3 hours of tip-off. "
+            "CLV will populate as more bets approach game time."
+        )
+    else:
+        _c1, _c2, _c3 = st.columns(3)
+        _c1.metric(
+            "Avg CLV",
+            f"{_avg_clv:+.2f}%" if _avg_clv is not None else "—",
+            help="Positive = we consistently got better odds than the market closed at.",
+        )
+        _c2.metric(
+            "Beat Closing Line",
+            f"{_beat_close:.0%}" if _beat_close is not None else "—",
+            help="% of bets where our opening price was better than DK's closing price.",
+        )
+        _clv_ev_corr = None
+        try:
+            import numpy as _np
+            _xs = [b.clv for b in _clv_bets]
+            _ys = [b.ev_pct or 0 for b in _clv_bets]
+            if len(_xs) >= 5:
+                _corr = float(_np.corrcoef(_xs, _ys)[0, 1])
+                _clv_ev_corr = _corr
+        except Exception:
+            pass
+        _c3.metric(
+            "CLV ↔ EV Correlation",
+            f"{_clv_ev_corr:.2f}" if _clv_ev_corr is not None else "—",
+            help="How well our EV estimates predict closing line movement. >0.3 = useful signal.",
+        )
+
+        # CLV distribution histogram
+        _clv_vals = [b.clv for b in _clv_bets]
+        _fig_clv = go.Figure()
+        _fig_clv.add_trace(go.Histogram(
+            x=_clv_vals, nbinsx=20,
+            marker_color=["#00e676" if v > 0 else "#ff5252" for v in _clv_vals],
+            marker_line_width=0.5, marker_line_color="#0e1117",
+            hovertemplate="CLV: %{x:.1f}%<br>Count: %{y}<extra></extra>",
+            name="CLV",
+        ))
+        _fig_clv.add_vline(x=0, line_dash="dash", line_color="#546e7a")
+        if _avg_clv is not None:
+            _fig_clv.add_vline(x=_avg_clv, line_dash="dot", line_color=_clv_col,
+                               annotation_text=f"avg {_avg_clv:+.2f}%")
+        _fig_clv.update_layout(
+            title="CLV Distribution — positive = beating the closing line",
+            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white",
+            xaxis_title="CLV (%)", yaxis_title="# Bets", height=280, showlegend=False,
+        )
+        st.plotly_chart(_fig_clv, use_container_width=True)
+
+        # CLV by sport
+        _clv_by_sport: dict = _dd(list)
+        for b in _clv_bets:
+            _clv_by_sport[b.sport].append(b.clv)
+        _sport_clv_rows = [
+            {
+                "Sport":         sp,
+                "Bets w/ CLV":   len(vals),
+                "Avg CLV":       f"{sum(vals)/len(vals):+.2f}%",
+                "Beat Close %":  f"{sum(1 for v in vals if v > 0)/len(vals):.0%}",
+                "Assessment":    (
+                    "Strong edge" if sum(vals)/len(vals) > 1.5
+                    else "Mild edge" if sum(vals)/len(vals) > 0.3
+                    else "No edge" if sum(vals)/len(vals) >= -0.3
+                    else "Fade this sport"
+                ),
+            }
+            for sp, vals in sorted(_clv_by_sport.items()) if vals
+        ]
+        if _sport_clv_rows:
+            st.dataframe(pd.DataFrame(_sport_clv_rows), use_container_width=True, hide_index=True)
 
     st.divider()
 

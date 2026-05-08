@@ -56,6 +56,81 @@ def _determine_win(bet_type: str, side: str, line: float | None, score: dict) ->
     return None
 
 
+def _snapshot_closing_lines(client) -> None:
+    """
+    For open bets whose game tip-off is within the next 3 hours,
+    save the current DK line as a provisional closing line.
+    Called before auto_settle so CLV is recorded even for games
+    that have since been removed from DK's live feed.
+    """
+    from models.ev_calculator import closing_line_value
+
+    window_lo = datetime.utcnow()
+    window_hi = datetime.utcnow() + timedelta(hours=3)
+
+    with session_scope() as s:
+        pre_tip = (
+            s.query(Bet)
+            .filter(Bet.settled == False)
+            .filter(Bet.closing_odds == None)
+            .filter(Bet.commence_time >= window_lo)
+            .filter(Bet.commence_time <= window_hi)
+            .all()
+        )
+        if not pre_tip:
+            return
+
+        sports_needed = {
+            (b.sport, config.SUPPORTED_SPORTS[b.sport])
+            for b in pre_tip
+            if b.sport in config.SUPPORTED_SPORTS
+        }
+
+    for sport_label, sport_key in sports_needed:
+        try:
+            games = client.get_odds(sport_key)
+            odds_by_id: dict[str, dict] = {}
+            for g in games:
+                odds_by_id[g.game_id] = g
+        except Exception as exc:
+            logger.warning("closing-line snapshot failed %s: %s", sport_label, exc)
+            continue
+
+        with session_scope() as s:
+            bets = (
+                s.query(Bet)
+                .filter(Bet.settled == False)
+                .filter(Bet.closing_odds == None)
+                .filter(Bet.sport == sport_label)
+                .filter(Bet.commence_time >= window_lo)
+                .filter(Bet.commence_time <= window_hi)
+                .all()
+            )
+            for bet in bets:
+                game = odds_by_id.get(bet.game_id)
+                if not game:
+                    continue
+                closing: float | None = None
+                if bet.bet_type == "moneyline":
+                    team = bet.home_team if bet.side == "home" else bet.away_team
+                    closing = game.get_line("h2h", team)
+                elif bet.bet_type == "spread":
+                    team = bet.home_team if bet.side == "home" else bet.away_team
+                    info = game.get_spread_line(team)
+                    closing = info[1] if info else None
+                elif bet.bet_type in ("total_over", "total_under"):
+                    name = "Over" if bet.bet_type == "total_over" else "Under"
+                    closing = game.get_line("totals", name)
+
+                if closing is not None:
+                    bet.closing_odds = closing
+                    bet.clv = round(closing_line_value(bet.odds, closing) * 100, 2)
+                    logger.info(
+                        "CLV snapshot bet #%d: open=%+.0f close=%+.0f CLV=%.2f%%",
+                        bet.id, bet.odds, closing, bet.clv,
+                    )
+
+
 def auto_settle(tracker: BankrollTracker | None = None) -> int:
     """
     Fetch scores for sports with open bets and settle any completed games.
@@ -103,6 +178,8 @@ def auto_settle(tracker: BankrollTracker | None = None) -> int:
     scores_by_id: dict[str, dict] = {}
 
     with OddsAPIClient() as client:
+        _snapshot_closing_lines(client)   # capture CLV before games leave DK feed
+
         for sport_label, sport_key in sports_needed:
             try:
                 for sc in client.get_scores(sport_key, days_from=3):
