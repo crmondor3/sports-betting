@@ -129,7 +129,7 @@ _BASE_BANKROLL = 100.0  # All performance tracking starts from this baseline
 def _init_state():
     defaults = {
         "sport":       "All",
-        "ev_min":      2.0,
+        "ev_min":      20.0,
         "ev_min_odds": -250,
         "ev_max_odds":  400,
         "bankroll":    _BASE_BANKROLL,
@@ -232,7 +232,7 @@ with st.sidebar:
         index=["All","NBA","MLB","NHL","NFL"].index(st.session_state["sport"]),
     )
     st.session_state["ev_min"] = st.slider(
-        "Min EV %", 1.0, 15.0,
+        "Min EV %", 1.0, 50.0,
         float(st.session_state["ev_min"]), 0.5, format="%.1f%%",
         help="Only show picks where calibrated edge exceeds this threshold.",
     )
