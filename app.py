@@ -39,9 +39,18 @@ if "auto_settled_done" not in st.session_state:
         n = auto_settle()
         st.session_state["auto_settled_done"] = True
         st.session_state["auto_settled_count"] = n
+        if n > 0 and "calibrator" in st.session_state:
+            del st.session_state["calibrator"]  # force calibration rebuild
     except Exception as _as_exc:
         st.session_state["auto_settled_done"] = True
         st.session_state["auto_settled_count"] = 0
+
+# ── Load / rebuild calibrator (persists in session, rebuilt after settle) ──────
+if "calibrator" not in st.session_state:
+    from models.calibrator import ModelCalibrator
+    st.session_state["calibrator"] = ModelCalibrator.rebuild_from_db()
+
+_calibrator = st.session_state["calibrator"]
 
 # ── Global styles ─────────────────────────────────────────────────────────────
 st.markdown("""
@@ -114,14 +123,16 @@ def _signal_html(signals: list[str]) -> str:
 
 # ── Session state defaults ─────────────────────────────────────────────────────
 
+_KELLY = 0.25          # Fixed quarter-Kelly — sized by calibrator confidence
+_BASE_BANKROLL = 100.0  # All performance tracking starts from this baseline
+
 def _init_state():
     defaults = {
-        "sport":      "All",
-        "ev_min":     2.0,     # min EV% to show
-        "ev_min_odds": -250,   # exclude bigger favorites than this
-        "ev_max_odds":  400,   # exclude longshots beyond this
-        "kelly":      0.25,
-        "bankroll":   100.0,
+        "sport":       "All",
+        "ev_min":      2.0,
+        "ev_min_odds": -250,
+        "ev_max_odds":  400,
+        "bankroll":    _BASE_BANKROLL,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -208,13 +219,13 @@ with st.sidebar:
 
     page = st.radio(
         "Page",
-        ["EV Picks", "Bankroll", "Bet History", "Settle Bets"],
+        ["EV Picks", "Bankroll", "Bet History"],
         label_visibility="collapsed",
     )
 
     st.divider()
     st.markdown("### Filters")
-    st.caption("All filters apply instantly to the current data.")
+    st.caption("Apply instantly — no recalculate needed.")
 
     st.session_state["sport"] = st.selectbox(
         "Sport", ["All", "NBA", "MLB", "NHL", "NFL"],
@@ -223,27 +234,35 @@ with st.sidebar:
     st.session_state["ev_min"] = st.slider(
         "Min EV %", 1.0, 15.0,
         float(st.session_state["ev_min"]), 0.5, format="%.1f%%",
-        help="Only show picks where the model's edge exceeds this threshold.",
+        help="Only show picks where calibrated edge exceeds this threshold.",
     )
     st.session_state["ev_min_odds"] = st.slider(
         "Exclude odds heavier than",
         min_value=-350, max_value=-100,
         value=int(st.session_state["ev_min_odds"]), step=10, format="%d",
-        help="e.g. -250 excludes -300, -400. Avoids massive favorites.",
+        help="-250 excludes -300, -400 etc. Avoids over-relying on heavy favorites.",
     )
     st.session_state["ev_max_odds"] = st.slider(
         "Exclude longshots above",
         min_value=150, max_value=600,
         value=int(st.session_state["ev_max_odds"]), step=25, format="+%d",
     )
-    st.session_state["kelly"] = st.slider(
-        "Kelly Fraction", 0.05, 1.0,
-        float(st.session_state["kelly"]), 0.05, format="%.0f%%",
-    )
     st.session_state["bankroll"] = st.number_input(
-        "Bankroll ($)", 10.0,
+        "Today's bankroll ($)", 10.0,
         value=float(st.session_state["bankroll"]), step=10.0,
+        help="Bet stakes are sized as quarter-Kelly × this amount.",
     )
+
+    # Show calibration status
+    _cal = _calibrator
+    if _cal.n_settled >= 10:
+        st.success(f"Model calibrated · {_cal.n_settled} settled bets")
+        if _cal.brier_score:
+            st.caption(f"Brier: {_cal.brier_score:.4f} · {_cal.model_quality_label()}")
+    elif _cal.n_settled > 0:
+        st.info(f"Calibrating… {_cal.n_settled}/10 bets settled")
+    else:
+        st.caption("Calibration active after 10 settled bets.")
 
     st.divider()
     any_cached = any(is_cached(f"dk_odds_{v}") for v in config.SUPPORTED_SPORTS.values())
@@ -262,9 +281,8 @@ with st.sidebar:
 
 
 # ── Active session values ──────────────────────────────────────────────────────
-sport_arg    = None if st.session_state["sport"] == "All" else st.session_state["sport"]
-kelly        = st.session_state["kelly"]
-bankroll_val = st.session_state["bankroll"]
+sport_arg     = None if st.session_state["sport"] == "All" else st.session_state["sport"]
+bankroll_val  = st.session_state["bankroll"]
 ev_min_filter = st.session_state["ev_min"]
 odds_lo       = st.session_state["ev_min_odds"]
 odds_hi       = st.session_state["ev_max_odds"]
@@ -282,11 +300,11 @@ if page == "EV Picks":
     )
 
     from models.kelly_criterion import kelly_fraction as _kf
-    from models.ev_calculator import american_to_decimal as _a2d, decimal_to_american as _d2a
+    from models.ev_calculator import american_to_decimal as _a2d, decimal_to_american as _d2a, calculate_ev as _cev
 
     with st.spinner("Fetching picks (odds cached daily)…"):
         try:
-            _all_dicts, _ev_stats, _api_rem = _run_ev_pipeline(sport_arg, kelly, bankroll_val)
+            _all_dicts, _ev_stats, _api_rem = _run_ev_pipeline(sport_arg, _KELLY, bankroll_val)
         except Exception as exc:
             st.error(f"Pipeline error: {exc}")
             st.info("Check that ODDS_API_KEY is set in your Streamlit secrets or .env")
@@ -296,11 +314,25 @@ if page == "EV Picks":
         st.cache_data.clear()
         st.rerun()
 
+    # ── Apply calibration to all picks (fresh every load) ─────────────────────
+    # Calibrator adjusts model_prob based on historical accuracy per sport+bet_type.
+    # Recomputes EV with calibrated probability so ranking reflects learned edge.
+    _cal = _calibrator
+    for _pd in _all_dicts:
+        _raw_p = _pd["model_prob"]
+        _adj_p = _cal.calibrate_prob(_raw_p, _pd["sport"], _pd["bet_type"])
+        _adj_ev = _cev(_adj_p, _pd["dk_odds"]) * 100
+        _km = _cal.kelly_multiplier(_pd["sport"])
+        _adj_frac = _kf(_adj_p, _pd["dk_odds"], _KELLY * _km)
+        _pd["model_prob"]  = _adj_p
+        _pd["ev_pct"]      = _adj_ev
+        _pd["kelly_frac"]  = _adj_frac
+        _pd["_kelly_mult"] = _km   # carry through for display
+
     # ── Auto-log ALL pipeline picks as model-tracked bets (idempotent) ─────────
     if "model_picks_logged" not in st.session_state:
-        _n_new = _auto_log_model_picks(_all_dicts, bankroll_val, kelly)
+        _n_new = _auto_log_model_picks(_all_dicts, bankroll_val, _KELLY)
         if _n_new > 0:
-            # Settle any completed games that were just logged
             from tracker.auto_settle import auto_settle as _settle_new
             _settle_new()
         st.session_state["model_picks_logged"] = True
@@ -369,12 +401,13 @@ if page == "EV Picks":
                 _conf    = _p["confidence"]
                 _ev_col  = _ev_color(_ev)
                 _odds_s  = f"+{_p['dk_odds']:.0f}" if _p["dk_odds"] >= 0 else f"{_p['dk_odds']:.0f}"
-                _edge    = _p.get("edge_pct", round((_prob - _p["implied_prob"]) * 100, 1))
+                _edge    = round((_prob - _p["implied_prob"]) * 100, 1)
                 _bteam   = _p.get("bet_team", _p["side"])
                 _blbl    = _p["bet_type"].replace("total_", "").replace("_", " ").title()
                 _sdisp   = _p["side"].upper() + (f" {_p['line']:+g}" if _p["line"] else "")
                 _sigs    = _signal_html(_p.get("signals", []))
-                _frac    = _kf(_prob, _p["dk_odds"], kelly)
+                _km      = _p.get("_kelly_mult", 1.0)
+                _frac    = _p["kelly_frac"]
                 _stake   = round(bankroll_val * _frac, 2)
                 _payout  = round((_a2d(_p["dk_odds"]) - 1) * 100, 0)
                 _be_dec  = 1 / _prob
@@ -439,7 +472,7 @@ if page == "EV Picks":
     <div>
       <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Stake (Kelly)</div>
       <div style="font-size:1.25rem;font-weight:800;color:#ffffff;">${_stake:.2f}</div>
-      <div style="font-size:0.85rem;color:#b0bec5;">{_frac:.1%} of ${bankroll_val:,.0f}</div>
+      <div style="font-size:0.85rem;color:#b0bec5;">{_frac:.1%} · {_km:.0%} confidence</div>
     </div>
     <div>
       <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Bet-To Line</div>
@@ -463,49 +496,7 @@ if page == "EV Picks":
 </div>
 """, unsafe_allow_html=True)
 
-        # ── Log bet ────────────────────────────────────────────────────────────
-        if _top_10:
-            st.divider()
-            with st.expander("Log a bet to tracker"):
-                from bets.edge_detector import EdgeBet
-                _log_labels = [
-                    f"#{_i}  {_d['game']}  —  "
-                    f"{_d['bet_type'].replace('total_','').title()} {_d['side'].upper()}"
-                    + (f" {_d['line']:+g}" if _d['line'] else "")
-                    + f"  ({'+' if _d['dk_odds']>=0 else ''}{int(_d['dk_odds'])})"
-                    for _i, _d in enumerate(_top_10, 1)
-                ]
-                _log_idx = st.selectbox(
-                    "Pick to log", range(len(_top_10)),
-                    format_func=lambda x: _log_labels[x], key="ev_log_sel"
-                )
-                _sel = _top_10[_log_idx]
-                _lc1, _lc2 = st.columns(2)
-                _log_odds  = _lc1.number_input(
-                    "Odds placed at (American)", value=int(_sel["dk_odds"]),
-                    step=1, key="ev_odds_input"
-                )
-                _log_frac  = _kf(_sel["model_prob"], float(_log_odds), kelly)
-                _log_stake = _lc2.number_input(
-                    "Stake ($)", value=round(bankroll_val * _log_frac, 2),
-                    min_value=0.01, step=0.50, key="ev_stake_input"
-                )
-                _log_tracker = BankrollTracker(starting_bankroll=bankroll_val)
-                if st.button("Log Bet", type="primary", key="ev_log_btn"):
-                    _eb = EdgeBet(
-                        sport=_sel["sport"], game_id=_sel["game_id"],
-                        home_team=_sel["home_team"], away_team=_sel["away_team"],
-                        commence_time=datetime.fromisoformat(_sel["commence_time_iso"]),
-                        bet_type=_sel["bet_type"], side=_sel["side"], line=_sel["line"],
-                        best_book="draftkings", best_odds=float(_log_odds),
-                        model_prob=_sel["model_prob"], implied_prob=_sel["implied_prob"],
-                        ev_pct=_sel["ev_pct"], kelly_frac=_log_frac,
-                        recommended_stake=_log_stake, is_sharp_book=False,
-                    )
-                    _bid = _log_tracker.log_bet(_eb, bankroll=bankroll_val)
-                    _os  = f"+{int(_log_odds)}" if _log_odds >= 0 else str(int(_log_odds))
-                    st.success(f"Logged Bet #{_bid} — {_sel['bet_team']} {_os} · Stake ${_log_stake:.2f}")
-                    st.rerun()
+        # All picks are auto-tracked — no manual log needed
 
     # ═══════ COMPLETED TODAY TAB ════════════════════════════════════════════════
     with _tab_done:
@@ -597,172 +588,225 @@ if page == "EV Picks":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Bankroll":
-    st.title("Bankroll Performance")
-    tracker = BankrollTracker(starting_bankroll=bankroll_val)
-    stats = tracker.get_stats()
+    from collections import defaultdict as _dd
+    from tracker.database import session_scope as _bss
+    from tracker.models import Bet as _BetM
 
-    start = stats.get("starting_bankroll", bankroll_val)
-    curr_k = stats.get("current_bankroll_kelly", bankroll_val)
-    curr_f = stats.get("current_bankroll_flat", bankroll_val)
+    st.title("Bankroll")
+    st.caption(
+        f"Model performance tracking from a ${_BASE_BANKROLL:.0f} starting bankroll. "
+        "Grows via quarter-Kelly EV bets, calibrated by historical accuracy."
+    )
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Bankroll (Kelly)", f"${curr_k:,.2f}",
-              delta=f"${curr_k - start:+.2f}" if stats["total_bets"] > 0 else None)
-    c2.metric("Bankroll (Flat)",  f"${curr_f:,.2f}",
-              delta=f"${curr_f - start:+.2f}" if stats["total_bets"] > 0 else None)
-    c3.metric("Hit Rate",  stats["hit_rate"])
-    c4.metric("ROI (Kelly)", stats["roi_kelly"])
-    c5.metric("Avg CLV",   stats["avg_clv"])
+    with _bss() as _bs:
+        _mbets = (
+            _bs.query(_BetM)
+            .filter(_BetM.settled == True, _BetM.auto_tracked == True)
+            .order_by(_BetM.settled_at)
+            .all()
+        )
 
-    col_a, col_b, col_c = st.columns(3)
-    col_a.metric("Starting Bankroll", f"${start:,.2f}")
-    col_b.metric("Settled Bets", stats["total_bets"])
-    col_c.metric("Open Bets", stats.get("open_bets", 0))
+    # ── Header KPIs ────────────────────────────────────────────────────────────
+    _total_pnl  = sum(b.pnl_kelly or 0 for b in _mbets)
+    _model_br   = _BASE_BANKROLL + _total_pnl
+    _total_ret  = (_model_br - _BASE_BANKROLL) / _BASE_BANKROLL * 100
+    _wins_m     = sum(1 for b in _mbets if b.won)
+    _hit_m      = _wins_m / len(_mbets) if _mbets else 0
+    _avg_ev_m   = sum(b.ev_pct or 0 for b in _mbets) / len(_mbets) if _mbets else 0
+    _theo_ev    = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in _mbets)
+    _open_count = 0
+    with _bss() as _bs2:
+        _open_count = _bs2.query(_BetM).filter(_BetM.settled == False, _BetM.auto_tracked == True).count()
 
-    if stats["total_bets"] == 0:
-        st.divider()
-        st.info("No settled bets yet — log a pick on Today's Picks and settle it here to see your chart.")
+    _br_col = "#00e676" if _model_br >= _BASE_BANKROLL else "#ff5252"
+    st.markdown(f"""
+<div style="background:#0d1520;border-radius:12px;padding:20px 24px;margin-bottom:20px;
+            display:flex;gap:32px;flex-wrap:wrap;align-items:center;">
+  <div>
+    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Model Bankroll</div>
+    <div style="font-size:2.4rem;font-weight:900;color:{_br_col};">${_model_br:,.2f}</div>
+    <div style="color:#78909c;font-size:0.8rem;">started at ${_BASE_BANKROLL:.0f}</div>
+  </div>
+  <div>
+    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Total Return</div>
+    <div style="font-size:1.8rem;font-weight:800;color:{_br_col};">{_total_ret:+.1f}%</div>
+  </div>
+  <div>
+    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Hit Rate</div>
+    <div style="font-size:1.6rem;font-weight:800;color:#cfd8dc;">{_hit_m:.1%}</div>
+    <div style="color:#78909c;font-size:0.8rem;">{_wins_m}W – {len(_mbets)-_wins_m}L</div>
+  </div>
+  <div>
+    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Avg EV / Pick</div>
+    <div style="font-size:1.6rem;font-weight:800;color:#cfd8dc;">{_avg_ev_m:+.1f}%</div>
+  </div>
+  <div>
+    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Settled / Open</div>
+    <div style="font-size:1.6rem;font-weight:800;color:#cfd8dc;">{len(_mbets)} / {_open_count}</div>
+  </div>
+  <div>
+    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Theoretical EV</div>
+    <div style="font-size:1.4rem;font-weight:700;color:#90caf9;">${_theo_ev:+.2f}</div>
+    <div style="color:#78909c;font-size:0.8rem;">actual: ${_total_pnl:+.2f}</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    if not _mbets:
+        st.info("No settled model bets yet. Results appear here as games complete (~4h after tip).")
         st.stop()
 
+    # ── Daily P&L + running bankroll ───────────────────────────────────────────
+    st.subheader("Daily Performance")
+    _daily_pnl: dict = _dd(float)
+    _daily_bets: dict = _dd(list)
+    for b in _mbets:
+        if b.settled_at:
+            _d = b.settled_at.date()
+            _daily_pnl[_d] += (b.pnl_kelly or 0)
+            _daily_bets[_d].append(b)
+
+    _running = _BASE_BANKROLL
+    _daily_rows = []
+    for _dt in sorted(_daily_pnl):
+        _day_p   = _daily_pnl[_dt]
+        _day_br  = _running  # bankroll at start of day
+        _day_pct = _day_p / _day_br * 100 if _day_br > 0 else 0
+        _running += _day_p
+        _day_bets = _daily_bets[_dt]
+        _day_w    = sum(1 for b in _day_bets if b.won)
+        _daily_rows.append({
+            "Date":      _dt,
+            "Bets":      len(_day_bets),
+            "W":         _day_w,
+            "L":         len(_day_bets) - _day_w,
+            "P&L":       round(_day_p, 2),
+            "Daily %":   round(_day_pct, 2),
+            "Bankroll":  round(_running, 2),
+        })
+
+    if _daily_rows:
+        _ddf = pd.DataFrame(_daily_rows)
+
+        # Running bankroll line chart
+        _fig_br = go.Figure()
+        _fig_br.add_hline(y=_BASE_BANKROLL, line_dash="dash", line_color="#546e7a",
+                          annotation_text=f"Start ${_BASE_BANKROLL:.0f}")
+        _fig_br.add_trace(go.Scatter(
+            x=_ddf["Date"], y=_ddf["Bankroll"], mode="lines+markers",
+            name="Bankroll", line=dict(color="#00e676", width=3),
+            fill="tozeroy", fillcolor="rgba(0,230,118,0.07)",
+            hovertemplate="<b>%{x}</b><br>$%{y:.2f}<extra></extra>",
+        ))
+        _fig_br.update_layout(
+            title="Model Bankroll Growth (from $100 start)",
+            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white",
+            xaxis_title="", yaxis_title="Bankroll ($)",
+            showlegend=False, height=320,
+        )
+        st.plotly_chart(_fig_br, use_container_width=True)
+
+        # Daily P&L bars
+        _fig_pnl = go.Figure()
+        _fig_pnl.add_trace(go.Bar(
+            x=_ddf["Date"], y=_ddf["P&L"],
+            marker_color=["#00e676" if v >= 0 else "#ff5252" for v in _ddf["P&L"]],
+            hovertemplate="<b>%{x}</b><br>%{customdata:.1f}%<br>$%{y:+.2f}<extra></extra>",
+            customdata=_ddf["Daily %"],
+        ))
+        _fig_pnl.update_layout(
+            title="Daily P&L",
+            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white",
+            xaxis_title="", yaxis_title="P&L ($)", height=260,
+        )
+        st.plotly_chart(_fig_pnl, use_container_width=True)
+
+        # Daily table
+        _ddf_disp = _ddf.copy()
+        _ddf_disp["P&L"]     = _ddf_disp["P&L"].map(lambda x: f"${x:+.2f}")
+        _ddf_disp["Daily %"] = _ddf_disp["Daily %"].map(lambda x: f"{x:+.2f}%")
+        _ddf_disp["Bankroll"]= _ddf_disp["Bankroll"].map(lambda x: f"${x:,.2f}")
+        st.dataframe(_ddf_disp, use_container_width=True, hide_index=True)
+
     st.divider()
 
-    from tracker.database import session_scope
-    from tracker.models import Bet
-    with session_scope() as s:
-        bets = s.query(Bet).filter(Bet.settled == True).order_by(Bet.settled_at).all()
+    # ── Model Calibration Report ───────────────────────────────────────────────
+    st.subheader("Model Calibration & Learning")
+    _cal = _calibrator
+    if _cal.n_settled < 10:
+        st.info(f"Calibration needs {10 - _cal.n_settled} more settled bets to activate. "
+                "All model picks are auto-tracked — just check back after games complete.")
+    else:
+        _bscore = _cal.brier_score or 0
+        _lloss  = _cal.log_loss or 0
+        cm1, cm2, cm3, cm4 = st.columns(4)
+        cm1.metric("Calibration Quality", _cal.model_quality_label())
+        cm2.metric("Brier Score", f"{_bscore:.4f}",
+                   help="Lower = better. Perfect = 0, coin flip = 0.25.")
+        cm3.metric("Log Loss", f"{_lloss:.4f}",
+                   help="Lower = better probability estimates.")
+        cm4.metric("Bets in Training Set", _cal.n_settled)
 
-    # ── EV Profile ─────────────────────────────────────────────────────────────
-    st.subheader("EV Profile")
-    st.caption(
-        "Tracking every pick the model surfaces — win rate and edge efficiency across all tracked bets."
-    )
-
-    _model_bets  = [b for b in bets if b.auto_tracked]
-    _placed_bets = [b for b in bets if not b.auto_tracked]
-
-    def _ev_stats(bet_list):
-        if not bet_list:
-            return dict(theo=0.0, pnl=0.0, eff=0.0, avg_ev=0.0, staked=0.0,
-                        wins=0, total=0, hit="—")
-        theo   = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in bet_list)
-        pnl    = sum(b.pnl_kelly or 0 for b in bet_list)
-        staked = sum(b.stake_kelly or 0 for b in bet_list)
-        wins   = sum(1 for b in bet_list if b.won)
-        return dict(
-            theo=theo, pnl=pnl,
-            eff=(pnl / theo * 100) if theo > 0 else 0.0,
-            avg_ev=sum(b.ev_pct or 0 for b in bet_list) / len(bet_list),
-            staked=staked, wins=wins, total=len(bet_list),
-            hit=f"{wins / len(bet_list):.1%}",
+        st.caption(
+            "The model learns from every settled bet. Calibration factors shrink overconfident "
+            "predictions and amplify underestimated ones. Kelly confidence (shown on each card) "
+            "scales stake size based on how well the model adds value above the book price."
         )
 
-    _ms = _ev_stats(_model_bets)
-    _ps = _ev_stats(_placed_bets)
+        if _cal.segment_report:
+            st.markdown("#### Segment Performance")
+            _seg_df = pd.DataFrame(_cal.segment_report)
+            st.dataframe(_seg_df, use_container_width=True, hide_index=True)
 
-    _ev_col_m = "#00e676" if _ms["eff"] >= 80 else "#ffeb3b" if _ms["eff"] >= 40 else "#ff5252"
-    _ev_col_p = "#00e676" if _ps["eff"] >= 80 else "#ffeb3b" if _ps["eff"] >= 40 else "#ff5252"
-
-    st.markdown("#### Model Picks (all auto-tracked)")
-    ep1, ep2, ep3, ep4, ep5 = st.columns(5)
-    ep1.metric("Settled", _ms["total"])
-    ep2.metric("Win Rate", _ms["hit"])
-    ep3.metric("Theoretical EV", f"${_ms['theo']:+.2f}",
-               help="EV% × Kelly stake at bet time.")
-    ep4.metric("Actual P&L", f"${_ms['pnl']:+.2f}",
-               delta=f"${_ms['pnl'] - _ms['theo']:+.2f} vs edge")
-    ep5.metric("EV Efficiency", f"{_ms['eff']:.0f}%",
-               help=">100% = running above model expectation.")
-
-    _mc = max(0.0, min(_ms["eff"], 200.0))
-    st.markdown(f"""
-<div style="margin:6px 0 14px;background:#0d1520;border-radius:6px;overflow:hidden;height:8px;">
-  <div style="width:{_mc/2:.1f}%;height:8px;background:{_ev_col_m};border-radius:6px;"></div>
-</div>
-<div style="font-size:0.8rem;color:#546e7a;margin-bottom:16px;">
-  {_ms['total']} settled picks · avg EV <b style="color:#cfd8dc;">{_ms['avg_ev']:+.1f}%</b>
-  · total staked <b style="color:#cfd8dc;">${_ms['staked']:,.2f}</b>
-</div>
-""", unsafe_allow_html=True)
-
-    if _placed_bets:
-        st.markdown("#### Manually Placed Bets")
-        fp1, fp2, fp3, fp4, fp5 = st.columns(5)
-        fp1.metric("Settled", _ps["total"])
-        fp2.metric("Win Rate", _ps["hit"])
-        fp3.metric("Theoretical EV", f"${_ps['theo']:+.2f}")
-        fp4.metric("Actual P&L", f"${_ps['pnl']:+.2f}",
-                   delta=f"${_ps['pnl'] - _ps['theo']:+.2f} vs edge")
-        fp5.metric("EV Efficiency", f"{_ps['eff']:.0f}%")
-        _pc = max(0.0, min(_ps["eff"], 200.0))
-        st.markdown(f"""
-<div style="margin:6px 0 14px;background:#0d1520;border-radius:6px;overflow:hidden;height:8px;">
-  <div style="width:{_pc/2:.1f}%;height:8px;background:{_ev_col_p};border-radius:6px;"></div>
-</div>
-""", unsafe_allow_html=True)
+        # Sport calibration factors
+        if _cal._sport_factor:
+            st.markdown("#### Calibration Factors by Sport")
+            _sf_rows = []
+            for _sp, _f in sorted(_cal._sport_factor.items()):
+                _km = _cal._kelly_mult.get(_sp, 1.0)
+                _sf_rows.append({
+                    "Sport":         _sp,
+                    "Cal Factor":    f"{_f:.3f}",
+                    "Kelly ×":       f"{_km:.2f}",
+                    "Interpretation": (
+                        f"⬆ inflating prob +{(_f-1)*100:.0f}%" if _f > 1.05
+                        else f"⬇ deflating prob {(_f-1)*100:.0f}%" if _f < 0.95
+                        else "✓ well-calibrated"
+                    ),
+                })
+            st.dataframe(pd.DataFrame(_sf_rows), use_container_width=True, hide_index=True)
 
     st.divider()
 
-    # Running bankroll chart — starts at bankroll_val, each settled bet moves it
-    running_k, running_f = bankroll_val, bankroll_val
-    rows = [{"Date": None, "Kelly": bankroll_val, "Flat": bankroll_val, "Label": "Start"}]
-    for b in bets:
-        running_k += b.pnl_kelly or 0
-        running_f += b.pnl_flat or 0
-        rows.append({
-            "Date": b.settled_at,
-            "Kelly": round(running_k, 2),
-            "Flat": round(running_f, 2),
-            "Label": f"#{b.id} {'W' if b.won else 'L'} {b.sport}",
-        })
-    cdf = pd.DataFrame(rows)
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=cdf["Date"], y=cdf["Kelly"], mode="lines+markers",
-                             name="Kelly", line=dict(color="#00e676", width=2)))
-    fig.add_trace(go.Scatter(x=cdf["Date"], y=cdf["Flat"], mode="lines+markers",
-                             name="Flat", line=dict(color="#40c4ff", width=2, dash="dot")))
-    fig.add_hline(y=bankroll_val, line_dash="dash", line_color="#555",
-                  annotation_text="Starting bankroll")
-    fig.update_layout(
-        title="Bankroll Over Time — Kelly vs Flat",
-        plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white",
-        legend=dict(bgcolor="#1e2a3a"), xaxis_title="Date", yaxis_title="$",
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # P&L by sport + bet type
-    col1, col2 = st.columns(2)
-    with col1:
-        sport_pnl = {}
-        for b in bets:
-            sport_pnl.setdefault(b.sport, 0)
-            sport_pnl[b.sport] += b.pnl_kelly or 0
-        fig2 = px.bar(
-            pd.DataFrame({"Sport": list(sport_pnl), "P&L ($)": list(sport_pnl.values())}),
+    # ── P&L breakdown ──────────────────────────────────────────────────────────
+    _col1, _col2 = st.columns(2)
+    with _col1:
+        _sp_pnl = _dd(float)
+        for b in _mbets:
+            _sp_pnl[b.sport] += (b.pnl_kelly or 0)
+        _fig2 = px.bar(
+            pd.DataFrame({"Sport": list(_sp_pnl), "P&L ($)": list(_sp_pnl.values())}),
             x="Sport", y="P&L ($)", color="P&L ($)",
             color_continuous_scale=["#ff5252", "#ffeb3b", "#00e676"],
-            title="P&L by Sport (Kelly)",
+            title="P&L by Sport",
         )
-        fig2.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white")
-        st.plotly_chart(fig2, use_container_width=True)
+        _fig2.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white")
+        st.plotly_chart(_fig2, use_container_width=True)
 
-    with col2:
-        type_data: dict[str, dict] = {}
-        for b in bets:
-            type_data.setdefault(b.bet_type, {"W": 0, "L": 0})
-            type_data[b.bet_type]["W" if b.won else "L"] += 1
-        tdf = pd.DataFrame([{"Type": t, "Wins": v["W"], "Losses": v["L"]} for t, v in type_data.items()])
-        fig3 = px.bar(tdf, x="Type", y=["Wins", "Losses"], barmode="group",
-                      color_discrete_map={"Wins": "#00e676", "Losses": "#ff5252"},
-                      title="W/L by Bet Type")
-        fig3.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white")
-        st.plotly_chart(fig3, use_container_width=True)
-
-    st.divider()
-    if st.button("Export Bets to CSV"):
-        path = tracker.export_csv()
-        with open(path, "rb") as f:
-            st.download_button("Download", f, file_name="bets_export.csv", mime="text/csv")
+    with _col2:
+        _td: dict = {}
+        for b in _mbets:
+            _td.setdefault(b.bet_type, {"W": 0, "L": 0})
+            _td[b.bet_type]["W" if b.won else "L"] += 1
+        _fig3 = px.bar(
+            pd.DataFrame([{"Type": t.replace("total_","").replace("_"," ").title(),
+                           "Wins": v["W"], "Losses": v["L"]} for t, v in _td.items()]),
+            x="Type", y=["Wins", "Losses"], barmode="group",
+            color_discrete_map={"Wins": "#00e676", "Losses": "#ff5252"},
+            title="W/L by Bet Type",
+        )
+        _fig3.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white")
+        st.plotly_chart(_fig3, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -770,109 +814,42 @@ elif page == "Bankroll":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Bet History":
+    from tracker.database import session_scope as _hss
+    from tracker.models import Bet as _HBet
+
     st.title("Bet History")
+    _ns = st.session_state.get("auto_settled_count", 0)
+    if _ns:
+        st.success(f"Auto-settled {_ns} bet(s) this session.")
 
-    n_settled = st.session_state.get("auto_settled_count", 0)
-    if n_settled:
-        st.success(f"Auto-settled {n_settled} bet(s) from completed games this session.")
-
-    from tracker.database import session_scope
-    from tracker.models import Bet
-
-    # Load all attributes inside the session to avoid detached-instance issues
-    with session_scope() as s:
-        all_bets = s.query(Bet).order_by(Bet.placed_at.desc()).all()
-        rows = [
+    with _hss() as _hs:
+        _hbets = _hs.query(_HBet).filter(_HBet.auto_tracked == True).order_by(_HBet.placed_at.desc()).all()
+        _hrows = [
             {
-                "ID": b.id,
-                "Date": b.placed_at.strftime("%Y-%m-%d %H:%M") if b.placed_at else "",
-                "Sport": b.sport or "",
-                "Game": f"{b.away_team or ''} @ {b.home_team or ''}",
-                "Type": (b.bet_type or "").replace("total_", "").replace("_", " ").title(),
-                "Side": (b.side or "") + (f" {b.line:+g}" if b.line else ""),
-                "Odds": f"{b.odds:+.0f}" if b.odds is not None else "",
-                "Model%": f"{b.model_prob:.1%}" if b.model_prob is not None else "",
-                "EV%": f"{b.ev_pct:+.2f}%" if b.ev_pct is not None else "",
-                "Stake": f"${b.stake_kelly:.2f}" if b.stake_kelly is not None else "",
-                "Result": ("WIN" if b.won else "LOSS") if b.settled else "OPEN",
-                "P&L": f"${b.pnl_kelly:+.2f}" if b.pnl_kelly is not None else "—",
-                "CLV": f"{b.clv:+.2f}%" if b.clv is not None else "—",
+                "Date":    b.placed_at.strftime("%m/%d %H:%M") if b.placed_at else "",
+                "Sport":   b.sport or "",
+                "Game":    f"{b.away_team or ''} @ {b.home_team or ''}",
+                "Type":    (b.bet_type or "").replace("total_","").replace("_"," ").title(),
+                "Side":    (b.side or "") + (f" {b.line:+g}" if b.line else ""),
+                "Odds":    f"{b.odds:+.0f}" if b.odds is not None else "",
+                "Model%":  f"{b.model_prob:.1%}" if b.model_prob is not None else "",
+                "EV%":     f"{b.ev_pct:+.2f}%" if b.ev_pct is not None else "",
+                "Stake $": f"${b.stake_kelly:.2f}" if b.stake_kelly is not None else "",
+                "Result":  ("WIN" if b.won else "LOSS") if b.settled else "OPEN",
+                "P&L":     f"${b.pnl_kelly:+.2f}" if b.pnl_kelly is not None else "—",
             }
-            for b in all_bets
+            for b in _hbets
         ]
 
-    if not rows:
-        st.info("No bets logged yet. Log a pick from Today's Picks to get started.")
+    if not _hrows:
+        st.info("No model bets tracked yet — picks are auto-logged when the pipeline runs.")
         st.stop()
 
-    df = pd.DataFrame(rows)
-
-    c1, c2 = st.columns(2)
-    sp_opts = df["Sport"].unique().tolist()
-    sp = c1.multiselect("Sport", sp_opts, default=sp_opts)
-    res = c2.multiselect("Result", ["WIN", "LOSS", "OPEN"], default=["WIN", "LOSS", "OPEN"])
-
-    filtered = df[df["Sport"].isin(sp) & df["Result"].isin(res)] if (sp and res) else df
-
-    st.dataframe(filtered, use_container_width=True, hide_index=True)
-    st.caption(f"{len(filtered)} of {len(rows)} bets")
-
-    st.divider()
-    with st.expander("Remove a bet"):
-        tracker_del = BankrollTracker(starting_bankroll=bankroll_val)
-        bet_options = {
-            f"#{r['ID']}  {r['Date']}  {r['Game']}  {r['Type']} {r['Side']}  {r['Odds']}  [{r['Result']}]": r["ID"]
-            for r in rows
-        }
-        if not bet_options:
-            st.info("No bets to remove.")
-        else:
-            sel_label = st.selectbox("Select bet to remove", list(bet_options.keys()), key="del_bet_sel")
-            sel_id = bet_options[sel_label]
-            confirmed = st.checkbox(f"I confirm I want to permanently delete Bet #{sel_id}", key="del_confirm")
-            if st.button("Delete Bet", type="primary", disabled=not confirmed, key="del_btn"):
-                tracker_del.delete_bet(sel_id)
-                st.success(f"Bet #{sel_id} deleted.")
-                st.rerun()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PAGE: Settle Bets
-# ══════════════════════════════════════════════════════════════════════════════
-
-elif page == "Settle Bets":
-    st.title("Settle Open Bets")
-    tracker = BankrollTracker(starting_bankroll=bankroll_val)
-    open_bets = tracker.get_open_bets()
-
-    if not open_bets:
-        st.success("No open bets.")
-        st.stop()
-
-    st.info(f"{len(open_bets)} open bet(s)")
-    for bet in open_bets:
-        with st.expander(
-            f"#{bet.id} · {bet.sport} · {bet.away_team} @ {bet.home_team} · "
-            f"{bet.bet_type} {bet.side} {bet.odds:+.0f}"
-        ):
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Stake (Kelly)", f"${bet.stake_kelly:.2f}")
-            c2.metric("Stake (Flat)",  f"${bet.stake_flat:.2f}")
-            c3.metric("EV at time",    f"{bet.ev_pct:+.2f}%")
-
-            with st.form(f"settle_{bet.id}"):
-                result = st.radio("Result", ["WIN", "LOSS"], horizontal=True)
-                closing = st.number_input("Closing Odds (optional)", value=0.0, step=1.0)
-                if st.form_submit_button("Settle"):
-                    tracker.settle_bet(bet.id, won=(result == "WIN"),
-                                       closing_odds=closing or None)
-                    st.success(f"Bet #{bet.id} settled as {result}")
-                    st.rerun()
-
-            st.divider()
-            confirmed_del = st.checkbox("Confirm delete", key=f"del_open_{bet.id}")
-            if st.button("Delete Bet", key=f"del_open_btn_{bet.id}",
-                         disabled=not confirmed_del):
-                tracker.delete_bet(bet.id)
-                st.success(f"Bet #{bet.id} deleted.")
-                st.rerun()
+    _hdf = pd.DataFrame(_hrows)
+    _hc1, _hc2 = st.columns(2)
+    _sp_opts = _hdf["Sport"].unique().tolist()
+    _sp_sel  = _hc1.multiselect("Sport", _sp_opts, default=_sp_opts)
+    _res_sel = _hc2.multiselect("Result", ["WIN","LOSS","OPEN"], default=["WIN","LOSS","OPEN"])
+    _hfilt   = _hdf[_hdf["Sport"].isin(_sp_sel) & _hdf["Result"].isin(_res_sel)] if (_sp_sel and _res_sel) else _hdf
+    st.dataframe(_hfilt, use_container_width=True, hide_index=True)
+    st.caption(f"{len(_hfilt)} of {len(_hrows)} model bets · all auto-tracked, auto-settled")

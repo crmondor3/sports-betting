@@ -269,8 +269,8 @@ def run_pipeline(
                 logger.info("%s: no DraftKings games today", label)
                 continue
 
-            # Bootstrap models from ESPN form data
-            elo = EloModel()
+            # Bootstrap models with sport-specific parameters
+            elo = EloModel(sport=label)
             poisson = PoissonModel()
 
             # Try to seed Poisson from ESPN scoring averages

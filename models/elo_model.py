@@ -16,6 +16,14 @@ DEFAULT_ELO = 1500.0
 K_FACTOR = 20.0
 HOME_ADVANTAGE = 50.0  # Elo points added to home team
 
+# Sport-specific tuning (empirically motivated):
+#   NFL: ~3.5 points ≈ 57% home win rate, fewer games → high K
+#   NBA: ~3 pts ≈ 59% home, rest/travel matters → moderate K+adv
+#   MLB: ~54% home, extreme game variance → low K
+#   NHL: ~55% home, puck luck → moderate K
+_SPORT_K:        dict[str, float] = {"NFL": 28, "NBA": 20, "MLB": 10, "NHL": 16}
+_SPORT_HOME_ADV: dict[str, float] = {"NFL": 70, "NBA": 35, "MLB": 18, "NHL": 28}
+
 
 @dataclass
 class MoneylinePrediction:
@@ -51,9 +59,15 @@ class EloModel:
     that can incorporate additional features (rest days, travel, injuries).
     """
 
-    def __init__(self, k: float = K_FACTOR, home_adv: float = HOME_ADVANTAGE):
-        self.k = k
-        self.home_adv = home_adv
+    def __init__(
+        self,
+        k: float = K_FACTOR,
+        home_adv: float = HOME_ADVANTAGE,
+        sport: str | None = None,
+    ):
+        # Sport-specific overrides take priority over generic defaults
+        self.k        = _SPORT_K.get(sport.upper(), k) if sport else k
+        self.home_adv = _SPORT_HOME_ADV.get(sport.upper(), home_adv) if sport else home_adv
         self._ratings: dict[str, float] = {}
         self._lr: LogisticRegression | None = None
         self._scaler: StandardScaler | None = None

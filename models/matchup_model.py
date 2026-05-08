@@ -13,13 +13,32 @@ from data.espn_api import MatchupData, TeamForm
 
 logger = logging.getLogger(__name__)
 
-# ── Signal weights ─────────────────────────────────────────────────────────────
-# How much each signal can move the probability away from 50%
-W_ELO         = 0.45   # Elo differential
-W_FORM        = 0.20   # L10 win rate differential
-W_HOME_AWAY   = 0.15   # actual home vs away records
-W_H2H         = 0.10   # head-to-head record
-W_REST        = 0.10   # rest days advantage
+# ── Sport-specific signal weights ──────────────────────────────────────────────
+# Motivated by empirical betting research on each sport's predictability:
+#
+# NFL: Strong home advantage (crowd + travel), scheme-based H2H, rest critical
+#      (short week vs bye), but fewer games means each prior game is noisy.
+# NBA: Form dominates (streaks are real), home advantage is modest vs crowd noise,
+#      rest effect is huge (B2B games, travel across time zones).
+# MLB: Starting pitcher dominates but we lack that signal; H2H ballpark effects
+#      are real; rest critical in September; Elo less predictive over 162 games.
+# NHL: Most random of 4 sports (puck luck, goalie variance); form and rest matter;
+#      home advantage is real but not as large as NFL.
+
+_SPORT_WEIGHTS: dict[str, dict[str, float]] = {
+    "NFL": {"elo": 0.38, "form": 0.15, "home_away": 0.22, "h2h": 0.15, "rest": 0.10},
+    "NBA": {"elo": 0.40, "form": 0.28, "home_away": 0.12, "h2h": 0.08, "rest": 0.12},
+    "MLB": {"elo": 0.32, "form": 0.14, "home_away": 0.16, "h2h": 0.22, "rest": 0.16},
+    "NHL": {"elo": 0.38, "form": 0.22, "home_away": 0.16, "h2h": 0.12, "rest": 0.12},
+}
+_DEFAULT_WEIGHTS = {"elo": 0.45, "form": 0.20, "home_away": 0.15, "h2h": 0.10, "rest": 0.10}
+
+# Legacy scalar aliases (used in analyse() for readability)
+W_ELO       = _DEFAULT_WEIGHTS["elo"]
+W_FORM      = _DEFAULT_WEIGHTS["form"]
+W_HOME_AWAY = _DEFAULT_WEIGHTS["home_away"]
+W_H2H       = _DEFAULT_WEIGHTS["h2h"]
+W_REST      = _DEFAULT_WEIGHTS["rest"]
 
 
 @dataclass
@@ -178,35 +197,41 @@ class MatchupAnalyzer:
             n = int(af.streak[1:] or 1)
             signals.append(Signal("Hot streak", f"{away} on {n}-game win streak", -1, min(n / 7, 1.0)))
 
+        # ── Sport-specific weights ────────────────────────────────────────────
+        w = _SPORT_WEIGHTS.get(sport.upper(), _DEFAULT_WEIGHTS)
+
         # ── Blend probabilities ────────────────────────────────────────────────
-        # Start from Elo, then nudge with each signal
+        # Start from Elo, then nudge with each signal using sport-appropriate weights
         p_home = elo_prob_home
 
         if (hf.wins + hf.losses) > 0:
-            form_contrib = (form_diff * W_FORM)
-            p_home = _clamp(p_home + form_contrib)
+            p_home = _clamp(p_home + form_diff * w["form"])
 
         if (hf.home_wins + hf.home_losses) > 5:
-            split_contrib = (split_diff * W_HOME_AWAY)
-            p_home = _clamp(p_home + split_contrib)
+            p_home = _clamp(p_home + split_diff * w["home_away"])
 
         if h2h.meetings >= 3:
-            h2h_contrib = (h2h_diff * W_H2H)
-            p_home = _clamp(p_home + h2h_contrib)
+            p_home = _clamp(p_home + h2h_diff * w["h2h"])
 
         if abs(rest_diff) >= 1:
-            rest_contrib = (min(rest_diff / 3, 1.0) * 0.03 * (1 if rest_diff > 0 else -1))
-            p_home = _clamp(p_home + rest_contrib)
+            # Rest advantage: normalise to [-1, 1] range then apply weight
+            rest_norm = min(abs(rest_diff) / 3, 1.0) * (1 if rest_diff > 0 else -1)
+            p_home = _clamp(p_home + rest_norm * w["rest"] * 0.3)
 
         # ── Confidence score ──────────────────────────────────────────────────
-        # Base: 40. Add up to 60 based on signal strength + agreement.
-        favourite_dir = 1 if p_home >= 0.5 else -1
-        agreeing = [s for s in signals if s.direction == favourite_dir]
-        disagreeing = [s for s in signals if s.direction == -favourite_dir]
-        agreement_score = sum(s.magnitude for s in agreeing) - sum(s.magnitude * 0.5 for s in disagreeing)
-        data_bonus = 15 if matchup.data_quality == "full" else 5
-        confidence = int(_clamp(0.4 + agreement_score * 0.35) * 100) + data_bonus
-        confidence = max(0, min(100, confidence))
+        # Signal agreement weighted by sport-relevant magnitudes.
+        favourite_dir   = 1 if p_home >= 0.5 else -1
+        agreeing        = [s for s in signals if s.direction == favourite_dir]
+        disagreeing     = [s for s in signals if s.direction == -favourite_dir]
+        agreement_score = (
+            sum(s.magnitude for s in agreeing)
+            - sum(s.magnitude * 0.5 for s in disagreeing)
+        )
+        # Bonus for how far the probability is from coin-flip (conviction bonus)
+        extremeness  = abs(p_home - 0.5) * 2   # 0 at 50/50, 1 at 100%
+        data_bonus   = 15 if matchup.data_quality == "full" else 5
+        raw_conf     = 0.38 + agreement_score * 0.32 + extremeness * 0.08
+        confidence   = max(0, min(100, int(_clamp(raw_conf) * 100) + data_bonus))
 
         # ── Totals prediction ─────────────────────────────────────────────────
         home_ppg = hf.ppg if hf.ppg > 0 else _league_avg_ppg(sport)
