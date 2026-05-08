@@ -29,11 +29,21 @@ def init_db() -> None:
     """Create all tables if they don't exist, and run lightweight migrations."""
     Base.metadata.create_all(bind=get_engine())
     with get_engine().connect() as conn:
+        # Add auto_tracked column if absent (idempotent — silently skips if exists)
         try:
             conn.execute(text("ALTER TABLE bets ADD COLUMN auto_tracked BOOLEAN DEFAULT 0"))
             conn.commit()
         except Exception:
-            pass  # Column already exists
+            pass
+        # Backfill: since manual logging is removed, every bet is a model pick.
+        # Rows inserted before this column existed have auto_tracked=0/NULL — fix them.
+        try:
+            conn.execute(text(
+                "UPDATE bets SET auto_tracked = 1 WHERE auto_tracked IS NULL OR auto_tracked = 0"
+            ))
+            conn.commit()
+        except Exception:
+            pass
 
 
 def get_session_factory() -> sessionmaker:

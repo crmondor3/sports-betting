@@ -601,7 +601,7 @@ elif page == "Bankroll":
     with _bss() as _bs:
         _mbets = (
             _bs.query(_BetM)
-            .filter(_BetM.settled == True, _BetM.auto_tracked == True)
+            .filter(_BetM.settled == True)
             .order_by(_BetM.settled_at)
             .all()
         )
@@ -616,7 +616,7 @@ elif page == "Bankroll":
     _theo_ev    = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in _mbets)
     _open_count = 0
     with _bss() as _bs2:
-        _open_count = _bs2.query(_BetM).filter(_BetM.settled == False, _BetM.auto_tracked == True).count()
+        _open_count = _bs2.query(_BetM).filter(_BetM.settled == False).count()
 
     _br_col = "#00e676" if _model_br >= _BASE_BANKROLL else "#ff5252"
     st.markdown(f"""
@@ -823,7 +823,7 @@ elif page == "Bet History":
         st.success(f"Auto-settled {_ns} bet(s) this session.")
 
     with _hss() as _hs:
-        _hbets = _hs.query(_HBet).filter(_HBet.auto_tracked == True).order_by(_HBet.placed_at.desc()).all()
+        _hbets = _hs.query(_HBet).order_by(_HBet.placed_at.desc()).all()
         _hrows = [
             {
                 "Date":    b.placed_at.strftime("%m/%d %H:%M") if b.placed_at else "",

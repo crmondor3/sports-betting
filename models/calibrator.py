@@ -275,13 +275,14 @@ class ModelCalibrator:
 
     @classmethod
     def rebuild_from_db(cls) -> "ModelCalibrator":
-        """Refit from all settled auto-tracked bets, save, and return."""
+        """Refit from all settled bets and return. No auto_tracked filter —
+        since manual logging is removed, every bet in the DB is a model pick."""
         from tracker.database import session_scope
         from tracker.models import Bet
         with session_scope() as s:
             bets = (
                 s.query(Bet)
-                .filter(Bet.settled == True, Bet.auto_tracked == True)
+                .filter(Bet.settled == True)
                 .all()
             )
         c = cls()
