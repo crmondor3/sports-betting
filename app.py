@@ -293,7 +293,15 @@ with st.sidebar:
         st.caption("Calibration active after 10 settled bets.")
 
     st.divider()
-    any_cached = any(is_cached(f"dk_odds_{v}") for v in config.SUPPORTED_SPORTS.values())
+    # API key status — most common reason buttons don't work
+    if config.ODDS_API_KEY:
+        st.success("API Key: configured")
+    else:
+        st.error("API Key missing — add ODDS_API_KEY to Streamlit secrets")
+
+    any_cached = any(
+        is_cached(f"dk_odds_v3_{v}") for v in config.SUPPORTED_SPORTS.values()
+    )
     if any_cached:
         st.success("Odds: cached today")
     else:
@@ -301,68 +309,81 @@ with st.sidebar:
 
     if st.button("Force Refresh Odds", use_container_width=True,
                  help="Burns ~4 API requests. Fetches fresh odds from DraftKings."):
-        bust_all()
-        st.cache_data.clear()
-        st.rerun()
+        if not config.ODDS_API_KEY:
+            st.error("Cannot refresh — ODDS_API_KEY not set.")
+        else:
+            bust_all()
+            st.cache_data.clear()
+            st.rerun()
 
     st.caption("Cache refreshes automatically at 7 AM ET daily.")
 
     st.divider()
     st.markdown("### ML Model Training")
-    st.caption("Trains a gradient-boosting model on 3 seasons of ESPN history per sport. Run once — re-run monthly.")
+    st.caption("Trains on 3 seasons of ESPN data per sport. Run once, re-run monthly.")
 
-    # Show current model status per sport
     from models.trainer import load as _load_bundle
     _any_trained = False
     for _sl in config.SUPPORTED_SPORTS:
         _b = _load_bundle(_sl)
         if _b:
             _any_trained = True
-            _trained_dt = _b.get("trained_at", "?")[:10]
             st.caption(
-                f"{_sl}: BSS={_b.get('bss', 0):.3f} · "
-                f"Brier={_b.get('brier', 0):.4f} · "
-                f"n={_b.get('n_games', 0):,} · {_trained_dt}"
+                f"{_sl}: BSS={_b.get('bss',0):.3f} · "
+                f"n={_b.get('n_games',0):,} · "
+                f"{_b.get('trained_at','?')[:10]}"
             )
     if not _any_trained:
-        st.warning("No trained model yet — click Train to build it.")
+        st.warning("No trained model — click Train to build it.")
 
-    if st.button("Train Model (3 seasons)", use_container_width=True,
-                 help="Fetches 3 seasons of ESPN data per sport, trains gradient boosting models. Takes 2-5 mins on first run (cached after)."):
+    if st.button("Train Model (3 seasons)", use_container_width=True):
         from models.trainer import train_all as _train_all
         _tprog = st.empty()
-        with st.spinner("Training… this may take a few minutes on first run."):
-            _results = _train_all(years_back=3, progress_cb=lambda m: _tprog.caption(m))
-        _tprog.empty()
-        _ok = [r for r in _results if "error" not in r]
-        _fail = [r for r in _results if "error" in r]
-        if _ok:
-            st.success(f"Trained {len(_ok)} sport models. Reloading pipeline…")
-        if _fail:
-            for _fr in _fail:
-                st.warning(f"{_fr['sport']}: {_fr.get('error', 'failed')}")
-        st.cache_data.clear()
-        st.rerun()
+        try:
+            with st.spinner("Fetching ESPN data and training… (2-5 min first run)"):
+                _results = _train_all(
+                    years_back=3,
+                    progress_cb=lambda m: _tprog.caption(m),
+                )
+            _tprog.empty()
+            _ok   = [r for r in _results if "error" not in r]
+            _fail = [r for r in _results if "error" in r]
+            for r in _ok:
+                st.success(
+                    f"{r['sport']}: trained on {r.get('n_games',0):,} games · "
+                    f"BSS={r.get('bss',0):.3f}"
+                )
+            for r in _fail:
+                st.warning(f"{r['sport']}: {r.get('error','failed')}")
+            if _ok:
+                st.cache_data.clear()
+                st.rerun()
+        except Exception as _te:
+            _tprog.empty()
+            st.error(f"Training error: {_te}")
 
     st.divider()
     st.markdown("### Calibration Seeding")
-    st.caption("Seed calibrator with last 90 days of ESPN results.")
-    if st.button("Run 90-Day Backfill", use_container_width=True,
-                 help="Fetches completed games from ESPN, runs model predictions, inserts settled training bets."):
+    st.caption("Seed calibrator with 90 days of ESPN results.")
+    if st.button("Run 90-Day Backfill", use_container_width=True):
         from data.historical_backfill import run_backfill
         _prog = st.empty()
-        with st.spinner("Fetching ESPN historical results…"):
-            _n = run_backfill(days=90, progress_cb=lambda m: _prog.caption(m))
-        _prog.empty()
-        if _n > 0:
-            st.success(f"Added {_n} historical bets — rebuilding calibrator…")
-            if "calibrator" in st.session_state:
-                del st.session_state["calibrator"]
-            from tracker.bankroll import BankrollTracker as _BRT2
-            _BRT2().auto_backup()
-            st.rerun()
-        else:
-            st.info("No new historical bets to add (already up to date).")
+        try:
+            with st.spinner("Fetching ESPN historical results…"):
+                _n = run_backfill(days=90, progress_cb=lambda m: _prog.caption(m))
+            _prog.empty()
+            if _n > 0:
+                st.success(f"Added {_n} historical bets.")
+                if "calibrator" in st.session_state:
+                    del st.session_state["calibrator"]
+                from tracker.bankroll import BankrollTracker as _BRT2
+                _BRT2().auto_backup()
+                st.rerun()
+            else:
+                st.info("No new historical bets (already up to date).")
+        except Exception as _be:
+            _prog.empty()
+            st.error(f"Backfill error: {_be}")
 
 
 # ── Active session values ──────────────────────────────────────────────────────
