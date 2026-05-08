@@ -287,6 +287,50 @@ ev_min_filter = st.session_state["ev_min"]
 odds_lo       = st.session_state["ev_min_odds"]
 odds_hi       = st.session_state["ev_max_odds"]
 
+from models.kelly_criterion import kelly_fraction as _kf
+from models.ev_calculator import american_to_decimal as _a2d, decimal_to_american as _d2a, calculate_ev as _cev
+
+# ── Pipeline: runs on every page load; cached so subsequent calls are instant ──
+# Picks are auto-logged here, not on any specific page, so the bankroll is always
+# up to date regardless of which tab the user visits first.
+_all_dicts:  list[dict] = []
+_ev_stats:   dict       = {}
+_api_rem:    int | None = None
+_pipe_error: str | None = None
+
+if not config.ODDS_API_KEY:
+    _pipe_error = "ODDS_API_KEY not set. Add it to .env or Streamlit secrets."
+else:
+    try:
+        _all_dicts, _ev_stats, _api_rem = _run_ev_pipeline(sport_arg, _KELLY, bankroll_val)
+
+        # Stale cache guard
+        if _all_dicts and "game_id" not in _all_dicts[0]:
+            st.cache_data.clear()
+            st.rerun()
+
+        # Apply calibration (always fresh — calibrator is session-scoped)
+        for _pd in _all_dicts:
+            _adj_p  = _calibrator.calibrate_prob(_pd["model_prob"], _pd["sport"], _pd["bet_type"])
+            _km     = _calibrator.kelly_multiplier(_pd["sport"])
+            _pd["model_prob"]  = _adj_p
+            _pd["ev_pct"]      = _cev(_adj_p, _pd["dk_odds"]) * 100
+            _pd["kelly_frac"]  = _kf(_adj_p, _pd["dk_odds"], _KELLY * _km)
+            _pd["_kelly_mult"] = _km
+
+        # Auto-log all picks to DB (idempotent — skips already-logged game+type+side)
+        _n_new = _auto_log_model_picks(_all_dicts, bankroll_val, _KELLY)
+        if _n_new > 0:
+            # Immediately try to settle any that have already completed
+            from tracker.auto_settle import auto_settle as _settle_new
+            _settle_new()
+            # Force calibrator rebuild with fresh data
+            if "calibrator" in st.session_state:
+                del st.session_state["calibrator"]
+
+    except Exception as _pe:
+        _pipe_error = str(_pe)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: EV Picks  — ranked by expected value, Active / Completed tabs
@@ -299,43 +343,10 @@ if page == "EV Picks":
         "on DraftKings. Ranked by EV%, updated daily at 7 AM ET."
     )
 
-    from models.kelly_criterion import kelly_fraction as _kf
-    from models.ev_calculator import american_to_decimal as _a2d, decimal_to_american as _d2a, calculate_ev as _cev
-
-    with st.spinner("Fetching picks (odds cached daily)…"):
-        try:
-            _all_dicts, _ev_stats, _api_rem = _run_ev_pipeline(sport_arg, _KELLY, bankroll_val)
-        except Exception as exc:
-            st.error(f"Pipeline error: {exc}")
-            st.info("Check that ODDS_API_KEY is set in your Streamlit secrets or .env")
-            st.stop()
-
-    if _all_dicts and "game_id" not in _all_dicts[0]:
-        st.cache_data.clear()
-        st.rerun()
-
-    # ── Apply calibration to all picks (fresh every load) ─────────────────────
-    # Calibrator adjusts model_prob based on historical accuracy per sport+bet_type.
-    # Recomputes EV with calibrated probability so ranking reflects learned edge.
-    _cal = _calibrator
-    for _pd in _all_dicts:
-        _raw_p = _pd["model_prob"]
-        _adj_p = _cal.calibrate_prob(_raw_p, _pd["sport"], _pd["bet_type"])
-        _adj_ev = _cev(_adj_p, _pd["dk_odds"]) * 100
-        _km = _cal.kelly_multiplier(_pd["sport"])
-        _adj_frac = _kf(_adj_p, _pd["dk_odds"], _KELLY * _km)
-        _pd["model_prob"]  = _adj_p
-        _pd["ev_pct"]      = _adj_ev
-        _pd["kelly_frac"]  = _adj_frac
-        _pd["_kelly_mult"] = _km   # carry through for display
-
-    # ── Auto-log ALL pipeline picks as model-tracked bets (idempotent) ─────────
-    if "model_picks_logged" not in st.session_state:
-        _n_new = _auto_log_model_picks(_all_dicts, bankroll_val, _KELLY)
-        if _n_new > 0:
-            from tracker.auto_settle import auto_settle as _settle_new
-            _settle_new()
-        st.session_state["model_picks_logged"] = True
+    if _pipe_error:
+        st.error(f"Pipeline error: {_pipe_error}")
+        st.info("Check that ODDS_API_KEY is set in your Streamlit secrets or .env")
+        st.stop()
 
     # ── Split: upcoming vs started ─────────────────────────────────────────────
     _now = datetime.now(timezone.utc)
