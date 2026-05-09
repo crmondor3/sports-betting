@@ -69,15 +69,6 @@ _calibrator = st.session_state["calibrator"]
 # ── Global styles ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* Force dark page background regardless of Streamlit Cloud theme setting */
-[data-testid="stAppViewContainer"] { background-color: #0e1117 !important; }
-[data-testid="stSidebar"]          { background-color: #111827 !important; }
-
-/* Force dataframe cells to use readable colours in dark mode */
-[data-testid="stDataFrame"] iframe { color-scheme: dark; }
-.stDataFrame { background-color: #1a2535 !important; }
-
-/* Card layout */
 .bet-card {
     background: #1a2535;
     border: 1px solid #2d4060;
@@ -88,19 +79,6 @@ st.markdown("""
 .bet-card-high  { border-left: 5px solid #00e676; }
 .bet-card-med   { border-left: 5px solid #ffeb3b; }
 .bet-card-low   { border-left: 5px solid #78909c; }
-
-/* KPI panels */
-.kpi-panel {
-    background: #1a2535;
-    border: 1px solid #2d4060;
-    border-radius: 12px;
-    padding: 20px 24px;
-    margin-bottom: 20px;
-    display: flex;
-    gap: 32px;
-    flex-wrap: wrap;
-    align-items: center;
-}
 
 .tag {
     display: inline-block;
@@ -116,8 +94,6 @@ st.markdown("""
 .signal-pos { color: #00e676; }
 .signal-neg { color: #ff5252; }
 .signal-neu { color: #90a4ae; }
-
-[data-testid="stMetricValue"] { font-size: 1.5rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -861,77 +837,40 @@ elif page == "Bankroll":
     )
 
     with _bss() as _bs:
-        _mbets = (
-            _bs.query(_BetM)
-            .filter(_BetM.settled == True)
-            .all()
-        )
-    # Sort by effective date: settled_at → placed_at → commence_time → epoch
+        _mbets = _bs.query(_BetM).filter(_BetM.settled == True).all()
+
     def _bet_date(b) -> datetime:
         return b.settled_at or b.placed_at or b.commence_time or datetime(2000, 1, 1)
     _mbets = sorted(_mbets, key=_bet_date)
 
-    # ── Header KPIs ────────────────────────────────────────────────────────────
+    # Empty-state guard — must come before any rendering
+    if not _mbets:
+        st.info("No settled bets yet. Run **90-Day Backfill** in the sidebar to seed historical data, then results appear here as live games complete.")
+        st.stop()
+
+    # ── Header KPIs (native st.metric — always theme-compatible) ──────────────
     _total_pnl  = sum(b.pnl_kelly or 0 for b in _mbets)
     _model_br   = _BASE_BANKROLL + _total_pnl
     _total_ret  = (_model_br - _BASE_BANKROLL) / _BASE_BANKROLL * 100
     _wins_m     = sum(1 for b in _mbets if b.won)
     _hit_m      = _wins_m / len(_mbets) if _mbets else 0
-    _avg_ev_m   = sum(b.ev_pct or 0 for b in _mbets) / len(_mbets) if _mbets else 0
     _theo_ev    = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in _mbets)
-    _open_count = 0
     with _bss() as _bs2:
         _open_count = _bs2.query(_BetM).filter(_BetM.settled == False).count()
 
-    # CLV metrics — the real long-term edge indicator
     _clv_bets   = [b for b in _mbets if b.clv is not None]
     _avg_clv    = sum(b.clv for b in _clv_bets) / len(_clv_bets) if _clv_bets else None
     _beat_close = sum(1 for b in _clv_bets if b.clv > 0) / len(_clv_bets) if _clv_bets else None
+    _clv_col    = ("#00e676" if (_avg_clv or 0) > 0 else "#ff5252") if _avg_clv is not None else "#78909c"
 
-    _br_col  = "#00e676" if _model_br >= _BASE_BANKROLL else "#ff5252"
-    _clv_col = ("#00e676" if (_avg_clv or 0) > 0 else "#ff5252") if _avg_clv is not None else "#78909c"
-
-    st.markdown(f"""
-<div class="kpi-panel">
-  <div>
-    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Model Bankroll</div>
-    <div style="font-size:2.4rem;font-weight:900;color:{_br_col};">${_model_br:,.2f}</div>
-    <div style="color:#78909c;font-size:0.8rem;">started at ${_BASE_BANKROLL:.0f}</div>
-  </div>
-  <div>
-    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Total Return</div>
-    <div style="font-size:1.8rem;font-weight:800;color:{_br_col};">{_total_ret:+.1f}%</div>
-  </div>
-  <div>
-    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Avg CLV</div>
-    <div style="font-size:1.8rem;font-weight:800;color:{_clv_col};">{"—" if _avg_clv is None else f"{_avg_clv:+.2f}%"}</div>
-    <div style="color:#78909c;font-size:0.8rem;">{"closing line value" if _avg_clv is not None else f"need {max(0,5-len(_clv_bets))} more CLV samples"}</div>
-  </div>
-  <div>
-    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Beat Close %</div>
-    <div style="font-size:1.6rem;font-weight:800;color:{_clv_col};">{"—" if _beat_close is None else f"{_beat_close:.0%}"}</div>
-    <div style="color:#78909c;font-size:0.8rem;">{len(_clv_bets)} CLV samples</div>
-  </div>
-  <div>
-    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Hit Rate</div>
-    <div style="font-size:1.6rem;font-weight:800;color:#cfd8dc;">{_hit_m:.1%}</div>
-    <div style="color:#78909c;font-size:0.8rem;">{_wins_m}W – {len(_mbets)-_wins_m}L</div>
-  </div>
-  <div>
-    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Settled / Open</div>
-    <div style="font-size:1.6rem;font-weight:800;color:#cfd8dc;">{len(_mbets)} / {_open_count}</div>
-  </div>
-  <div>
-    <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Theoretical EV</div>
-    <div style="font-size:1.4rem;font-weight:700;color:#90caf9;">${_theo_ev:+.2f}</div>
-    <div style="color:#78909c;font-size:0.8rem;">actual: ${_total_pnl:+.2f}</div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-    if not _mbets:
-        st.info("No settled model bets yet. Results appear here as games complete (~4h after tip).")
-        st.stop()
+    _k1, _k2, _k3, _k4, _k5, _k6, _k7 = st.columns(7)
+    _k1.metric("Model Bankroll",  f"${_model_br:,.2f}", f"{_total_ret:+.1f}% vs ${_BASE_BANKROLL:.0f} start")
+    _k2.metric("Total Return",    f"{_total_ret:+.1f}%")
+    _k3.metric("Avg CLV",         f"{_avg_clv:+.2f}%" if _avg_clv is not None else "—")
+    _k4.metric("Beat Close %",    f"{_beat_close:.0%}" if _beat_close is not None else "—", f"{len(_clv_bets)} samples")
+    _k5.metric("Hit Rate",        f"{_hit_m:.1%}", f"{_wins_m}W – {len(_mbets)-_wins_m}L")
+    _k6.metric("Settled / Open",  f"{len(_mbets)} / {_open_count}")
+    _k7.metric("Theoretical EV",  f"${_theo_ev:+.2f}", f"actual ${_total_pnl:+.2f}")
 
     # ── Daily P&L + running bankroll ───────────────────────────────────────────
     st.subheader("Daily Performance")
@@ -976,7 +915,7 @@ elif page == "Bankroll":
         ))
         _fig_br.update_layout(
             title="Model Bankroll Growth (from $100 start)",
-            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white",
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             xaxis_title="", yaxis_title="Bankroll ($)",
             showlegend=False, height=320,
         )
@@ -992,7 +931,7 @@ elif page == "Bankroll":
         ))
         _fig_pnl.update_layout(
             title="Daily P&L",
-            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white",
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             xaxis_title="", yaxis_title="P&L ($)", height=260,
         )
         st.plotly_chart(_fig_pnl, use_container_width=True)
@@ -1063,7 +1002,7 @@ elif page == "Bankroll":
                                annotation_text=f"avg {_avg_clv:+.2f}%")
         _fig_clv.update_layout(
             title="CLV Distribution — positive = beating the closing line",
-            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white",
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             xaxis_title="CLV (%)", yaxis_title="# Bets", height=280, showlegend=False,
         )
         st.plotly_chart(_fig_clv, use_container_width=True)
@@ -1152,7 +1091,7 @@ elif page == "Bankroll":
             color_continuous_scale=["#ff5252", "#ffeb3b", "#00e676"],
             title="P&L by Sport",
         )
-        _fig2.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white")
+        _fig2.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(_fig2, use_container_width=True)
 
     with _col2:
@@ -1167,7 +1106,7 @@ elif page == "Bankroll":
             color_discrete_map={"Wins": "#00e676", "Losses": "#ff5252"},
             title="W/L by Bet Type",
         )
-        _fig3.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white")
+        _fig3.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(_fig3, use_container_width=True)
 
 
@@ -1204,14 +1143,32 @@ elif page == "Bet History":
         ]
 
     if not _hrows:
-        st.info("No model bets tracked yet — picks are auto-logged when the pipeline runs.")
+        st.info("No model bets yet. The pipeline auto-logs picks each time the page loads (requires ODDS_API_KEY). Run **90-Day Backfill** in the sidebar to seed historical calibration data.")
         st.stop()
 
     _hdf = pd.DataFrame(_hrows)
     _hc1, _hc2 = st.columns(2)
-    _sp_opts = _hdf["Sport"].unique().tolist()
+    _sp_opts = sorted(_hdf["Sport"].unique().tolist())
     _sp_sel  = _hc1.multiselect("Sport", _sp_opts, default=_sp_opts)
     _res_sel = _hc2.multiselect("Result", ["WIN","LOSS","OPEN"], default=["WIN","LOSS","OPEN"])
     _hfilt   = _hdf[_hdf["Sport"].isin(_sp_sel) & _hdf["Result"].isin(_res_sel)] if (_sp_sel and _res_sel) else _hdf
-    st.dataframe(_hfilt, use_container_width=True, hide_index=True)
-    st.caption(f"{len(_hfilt)} of {len(_hrows)} model bets · all auto-tracked, auto-settled")
+
+    st.dataframe(
+        _hfilt,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Date":    st.column_config.TextColumn("Date",    width="small"),
+            "Sport":   st.column_config.TextColumn("Sport",   width="small"),
+            "Game":    st.column_config.TextColumn("Game",    width="large"),
+            "Type":    st.column_config.TextColumn("Type",    width="small"),
+            "Side":    st.column_config.TextColumn("Side",    width="small"),
+            "Odds":    st.column_config.TextColumn("Odds",    width="small"),
+            "Model%":  st.column_config.TextColumn("Model%",  width="small"),
+            "EV%":     st.column_config.TextColumn("EV%",     width="small"),
+            "Stake $": st.column_config.TextColumn("Stake $", width="small"),
+            "Result":  st.column_config.TextColumn("Result",  width="small"),
+            "P&L":     st.column_config.TextColumn("P&L",     width="small"),
+        },
+    )
+    st.caption(f"{len(_hfilt):,} of {len(_hrows):,} bets · auto-tracked and auto-settled")
