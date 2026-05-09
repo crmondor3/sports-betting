@@ -123,13 +123,45 @@ def _card_class(conf: int) -> str:
 def _signal_html(signals: list[str]) -> str:
     parts = []
     for s in signals:
+        body = s[2:] if len(s) > 2 else s
         if s.startswith("+"):
-            parts.append(f'<span class="signal-pos">&#10003; {s[2:]}</span>')
+            parts.append(f'<span class="signal-pos">&#10003; {body}</span>')
         elif s.startswith("-"):
-            parts.append(f'<span class="signal-neg">&#10007; {s[2:]}</span>')
+            parts.append(f'<span class="signal-neg">&#10007; {body}</span>')
         else:
-            parts.append(f'<span class="signal-neu">~ {s[2:]}</span>')
+            parts.append(f'<span class="signal-neu">&#8764; {body}</span>')
     return "<br>".join(parts)
+
+
+def _html_table(df: pd.DataFrame) -> None:
+    """Render a DataFrame as a styled HTML table — works in any Streamlit theme."""
+    if df.empty:
+        st.caption("No data yet.")
+        return
+    hcells = "".join(
+        f'<th style="padding:8px 14px;background:#1e3a5f;color:#90caf9;'
+        f'font-size:0.72rem;text-transform:uppercase;letter-spacing:0.8px;'
+        f'border-bottom:2px solid #2d4060;white-space:nowrap;">{c}</th>'
+        for c in df.columns
+    )
+    rows_html = ""
+    for idx, row in df.iterrows():
+        bg = "#0f1a2e" if idx % 2 == 0 else "#111e30"
+        cells = "".join(
+            f'<td style="padding:7px 14px;border-bottom:1px solid #1e2d40;'
+            f'color:#dde6f0;font-size:0.85rem;">{v}</td>'
+            for v in row
+        )
+        rows_html += f'<tr style="background:{bg};">{cells}</tr>'
+    st.markdown(
+        f'<div style="overflow-x:auto;border-radius:8px;border:1px solid #2d4060;'
+        f'margin-bottom:12px;">'
+        f'<table style="width:100%;border-collapse:collapse;">'
+        f'<thead><tr>{hcells}</tr></thead>'
+        f'<tbody>{rows_html}</tbody>'
+        f'</table></div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ── Session state defaults ─────────────────────────────────────────────────────
@@ -581,7 +613,7 @@ if page == "EV Picks":
                 _frac    = _p["kelly_frac"]
                 _stake   = round(_effective_bankroll * _frac, 2)
                 _payout  = round((_a2d(_p["dk_odds"]) - 1) * 100, 0)
-                _be_dec  = 1 / _prob
+                _be_dec  = 1 / _prob if _prob > 0.01 else 99.0
                 _be_amer = _d2a(_be_dec)
                 _be_s    = f"+{_be_amer:.0f}" if _be_amer >= 0 else f"{_be_amer:.0f}"
 
@@ -687,41 +719,41 @@ if page == "EV Picks":
     Edge: <b style="color:{_ev_col};">+{_edge:.1f}%</b>
   </div>
 
-  <div style="margin-top:14px;display:flex;gap:28px;flex-wrap:wrap;">
-    <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Bet</div>
-      <div style="font-size:1.25rem;font-weight:800;color:#ffffff;">{_bteam}</div>
-      <div style="font-size:0.85rem;color:#b0bec5;">{_blbl} &nbsp;{_sdisp}</div>
+  <div style="margin-top:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:16px 20px;">
+    <div style="min-width:0;">
+      <div style="color:#78909c;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">Bet</div>
+      <div style="font-size:1.1rem;font-weight:800;color:#ffffff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{_bteam}</div>
+      <div style="font-size:0.8rem;color:#b0bec5;">{_blbl} {_sdisp}</div>
     </div>
-    <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Market Edge</div>
-      <div style="font-size:1.6rem;font-weight:900;color:{_medge_col};">{_medge:+.1f}%</div>
-      <div style="font-size:0.8rem;color:#b0bec5;">consensus vs DK</div>
+    <div style="min-width:0;">
+      <div style="color:#78909c;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">Market Edge</div>
+      <div style="font-size:1.4rem;font-weight:900;color:{_medge_col};">{_medge:+.1f}%</div>
+      <div style="font-size:0.78rem;color:#b0bec5;">vs consensus</div>
     </div>
-    <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">EV (blended)</div>
+    <div style="min-width:0;">
+      <div style="color:#78909c;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">Model EV</div>
       <div style="font-size:1.4rem;font-weight:800;color:{_ev_col};">{_ev:+.1f}%</div>
-      <div style="font-size:0.8rem;color:#b0bec5;">+${_payout:.0f} per $100</div>
+      <div style="font-size:0.78rem;color:#b0bec5;">+${_payout:.0f} per $100</div>
     </div>
-    <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">DK Odds</div>
+    <div style="min-width:0;">
+      <div style="color:#78909c;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">DK Odds</div>
       <div style="font-size:1.4rem;font-weight:800;color:#ffffff;">{_odds_s}</div>
-      <div style="font-size:0.8rem;color:#b0bec5;">implied {_p['implied_prob']:.1%}</div>
+      <div style="font-size:0.78rem;color:#b0bec5;">implied {_p['implied_prob']:.1%}</div>
     </div>
-    <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Stake (Kelly)</div>
-      <div style="font-size:1.25rem;font-weight:800;color:#ffffff;">${_stake:.2f}</div>
-      <div style="font-size:0.85rem;color:#b0bec5;">{_frac:.1%} · {_km:.0%} conf</div>
+    <div style="min-width:0;">
+      <div style="color:#78909c;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">Kelly Stake</div>
+      <div style="font-size:1.2rem;font-weight:800;color:#ffffff;">${_stake:.2f}</div>
+      <div style="font-size:0.78rem;color:#b0bec5;">{_frac:.1%} · {_km:.0%} conf</div>
     </div>
-    <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Bet-To Line</div>
-      <div style="font-size:1.15rem;font-weight:700;color:#ff5252;">{_be_s}</div>
-      <div style="font-size:0.8rem;color:#b0bec5;">no edge below this</div>
+    <div style="min-width:0;">
+      <div style="color:#78909c;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">Break-Even</div>
+      <div style="font-size:1.1rem;font-weight:700;color:#ff5252;">{_be_s}</div>
+      <div style="font-size:0.78rem;color:#b0bec5;">no edge below</div>
     </div>
-    <div>
-      <div style="color:#78909c;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Books / Confidence</div>
-      <div style="font-size:1.15rem;font-weight:700;color:{_conf_color(_conf)};">{_nb} books</div>
-      <div style="font-size:0.8rem;color:#b0bec5;">{_conf}/100 · {_conf_label(_conf)}</div>
+    <div style="min-width:0;">
+      <div style="color:#78909c;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">Confidence</div>
+      <div style="font-size:1.1rem;font-weight:700;color:{_conf_color(_conf)};">{_nb} books · {_conf}/100</div>
+      <div style="font-size:0.78rem;color:#b0bec5;">{_conf_label(_conf)}</div>
     </div>
   </div>
 
@@ -827,50 +859,66 @@ if page == "EV Picks":
 
 elif page == "Bankroll":
     from collections import defaultdict as _dd
+    from datetime import timedelta
     from tracker.database import session_scope as _bss
     from tracker.models import Bet as _BetM
 
-    st.title("Bankroll")
-    st.caption(
-        f"Model performance tracking from a ${_BASE_BANKROLL:.0f} starting bankroll. "
-        "Grows via quarter-Kelly EV bets, calibrated by historical accuracy."
-    )
+    st.title("Bankroll Tracker")
+
+    # ── Date range picker ──────────────────────────────────────────────────────
+    _br_hdr, _br_date_col = st.columns([3, 1])
+    with _br_date_col:
+        _br_start = st.date_input(
+            "Track from",
+            value=date.today() - timedelta(days=30),
+            help="Only bets placed on or after this date are included in the analysis.",
+        )
 
     with _bss() as _bs:
-        _mbets = _bs.query(_BetM).filter(_BetM.settled == True).all()
+        _all_settled = _bs.query(_BetM).filter(_BetM.settled == True).all()
 
     def _bet_date(b) -> datetime:
         return b.settled_at or b.placed_at or b.commence_time or datetime(2000, 1, 1)
-    _mbets = sorted(_mbets, key=_bet_date)
 
-    # Empty-state guard — must come before any rendering
+    # Filter by selected start date (exclude synthetic espn_historical from real P&L display)
+    _mbets = sorted(
+        [b for b in _all_settled if _bet_date(b).date() >= _br_start],
+        key=_bet_date,
+    )
+    _real_mbets = [b for b in _mbets if b.bookmaker != "espn_historical"]
+
+    with _br_hdr:
+        st.caption(
+            f"Showing **{len(_mbets):,}** settled bets from {_br_start.isoformat()} onwards "
+            f"({len(_real_mbets):,} real, {len(_mbets)-len(_real_mbets):,} calibration). "
+            "Adjust the date to change the analysis window."
+        )
+
     if not _mbets:
-        st.info("No settled bets yet. Run **90-Day Backfill** in the sidebar to seed historical data, then results appear here as live games complete.")
+        st.info("No settled bets in the selected date range. Run **90-Day Backfill** in the sidebar or widen the date range.")
         st.stop()
 
-    # ── Header KPIs (native st.metric — always theme-compatible) ──────────────
-    _total_pnl  = sum(b.pnl_kelly or 0 for b in _mbets)
+    # ── KPIs — native st.metric, always theme-compatible ──────────────────────
+    _total_pnl  = sum(b.pnl_kelly or 0 for b in _real_mbets)   # real bets only for P&L
     _model_br   = _BASE_BANKROLL + _total_pnl
     _total_ret  = (_model_br - _BASE_BANKROLL) / _BASE_BANKROLL * 100
     _wins_m     = sum(1 for b in _mbets if b.won)
     _hit_m      = _wins_m / len(_mbets) if _mbets else 0
-    _theo_ev    = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in _mbets)
+    _theo_ev    = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in _real_mbets)
     with _bss() as _bs2:
         _open_count = _bs2.query(_BetM).filter(_BetM.settled == False).count()
 
     _clv_bets   = [b for b in _mbets if b.clv is not None]
     _avg_clv    = sum(b.clv for b in _clv_bets) / len(_clv_bets) if _clv_bets else None
     _beat_close = sum(1 for b in _clv_bets if b.clv > 0) / len(_clv_bets) if _clv_bets else None
-    _clv_col    = ("#00e676" if (_avg_clv or 0) > 0 else "#ff5252") if _avg_clv is not None else "#78909c"
 
-    _k1, _k2, _k3, _k4, _k5, _k6, _k7 = st.columns(7)
-    _k1.metric("Model Bankroll",  f"${_model_br:,.2f}", f"{_total_ret:+.1f}% vs ${_BASE_BANKROLL:.0f} start")
-    _k2.metric("Total Return",    f"{_total_ret:+.1f}%")
-    _k3.metric("Avg CLV",         f"{_avg_clv:+.2f}%" if _avg_clv is not None else "—")
-    _k4.metric("Beat Close %",    f"{_beat_close:.0%}" if _beat_close is not None else "—", f"{len(_clv_bets)} samples")
-    _k5.metric("Hit Rate",        f"{_hit_m:.1%}", f"{_wins_m}W – {len(_mbets)-_wins_m}L")
-    _k6.metric("Settled / Open",  f"{len(_mbets)} / {_open_count}")
-    _k7.metric("Theoretical EV",  f"${_theo_ev:+.2f}", f"actual ${_total_pnl:+.2f}")
+    _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
+    _k1.metric("Model Bankroll",  f"${_model_br:,.2f}", f"{_total_ret:+.1f}%")
+    _k2.metric("Real P&L",        f"${_total_pnl:+.2f}", f"{len(_real_mbets)} real bets")
+    _k3.metric("Hit Rate",        f"{_hit_m:.1%}", f"{_wins_m}W – {len(_mbets)-_wins_m}L")
+    _k4.metric("Avg CLV",         f"{_avg_clv:+.2f}%" if _avg_clv is not None else "—")
+    _k5.metric("Beat Close %",    f"{_beat_close:.0%}" if _beat_close is not None else "—")
+    _k6.metric("Open Bets",       str(_open_count))
 
     # ── Daily P&L + running bankroll ───────────────────────────────────────────
     st.subheader("Daily Performance")
@@ -941,7 +989,7 @@ elif page == "Bankroll":
         _ddf_disp["P&L"]     = _ddf_disp["P&L"].map(lambda x: f"${x:+.2f}")
         _ddf_disp["Daily %"] = _ddf_disp["Daily %"].map(lambda x: f"{x:+.2f}%")
         _ddf_disp["Bankroll"]= _ddf_disp["Bankroll"].map(lambda x: f"${x:,.2f}")
-        st.dataframe(_ddf_disp, use_container_width=True, hide_index=True)
+        _html_table(_ddf_disp)
 
     st.divider()
 
@@ -1027,7 +1075,7 @@ elif page == "Bankroll":
             for sp, vals in sorted(_clv_by_sport.items()) if vals
         ]
         if _sport_clv_rows:
-            st.dataframe(pd.DataFrame(_sport_clv_rows), use_container_width=True, hide_index=True)
+            _html_table(pd.DataFrame(_sport_clv_rows))
 
     st.divider()
 
@@ -1056,26 +1104,24 @@ elif page == "Bankroll":
 
         if _cal.segment_report:
             st.markdown("#### Segment Performance")
-            _seg_df = pd.DataFrame(_cal.segment_report)
-            st.dataframe(_seg_df, use_container_width=True, hide_index=True)
+            _html_table(pd.DataFrame(_cal.segment_report))
 
-        # Sport calibration factors
         if _cal._sport_factor:
             st.markdown("#### Calibration Factors by Sport")
             _sf_rows = []
             for _sp, _f in sorted(_cal._sport_factor.items()):
                 _km = _cal._kelly_mult.get(_sp, 1.0)
                 _sf_rows.append({
-                    "Sport":         _sp,
-                    "Cal Factor":    f"{_f:.3f}",
-                    "Kelly ×":       f"{_km:.2f}",
+                    "Sport":          _sp,
+                    "Cal Factor":     f"{_f:.3f}",
+                    "Kelly ×":        f"{_km:.2f}",
                     "Interpretation": (
-                        f"⬆ inflating prob +{(_f-1)*100:.0f}%" if _f > 1.05
-                        else f"⬇ deflating prob {(_f-1)*100:.0f}%" if _f < 0.95
-                        else "✓ well-calibrated"
+                        f"Over-estimates: correcting down {(1-_f)*100:.0f}%" if _f < 0.95
+                        else f"Under-estimates: correcting up {(_f-1)*100:.0f}%" if _f > 1.05
+                        else "Well-calibrated"
                     ),
                 })
-            st.dataframe(pd.DataFrame(_sf_rows), use_container_width=True, hide_index=True)
+            _html_table(pd.DataFrame(_sf_rows))
 
     st.divider()
 
@@ -1153,22 +1199,9 @@ elif page == "Bet History":
     _res_sel = _hc2.multiselect("Result", ["WIN","LOSS","OPEN"], default=["WIN","LOSS","OPEN"])
     _hfilt   = _hdf[_hdf["Sport"].isin(_sp_sel) & _hdf["Result"].isin(_res_sel)] if (_sp_sel and _res_sel) else _hdf
 
-    st.dataframe(
-        _hfilt,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Date":    st.column_config.TextColumn("Date",    width="small"),
-            "Sport":   st.column_config.TextColumn("Sport",   width="small"),
-            "Game":    st.column_config.TextColumn("Game",    width="large"),
-            "Type":    st.column_config.TextColumn("Type",    width="small"),
-            "Side":    st.column_config.TextColumn("Side",    width="small"),
-            "Odds":    st.column_config.TextColumn("Odds",    width="small"),
-            "Model%":  st.column_config.TextColumn("Model%",  width="small"),
-            "EV%":     st.column_config.TextColumn("EV%",     width="small"),
-            "Stake $": st.column_config.TextColumn("Stake $", width="small"),
-            "Result":  st.column_config.TextColumn("Result",  width="small"),
-            "P&L":     st.column_config.TextColumn("P&L",     width="small"),
-        },
-    )
-    st.caption(f"{len(_hfilt):,} of {len(_hrows):,} bets · auto-tracked and auto-settled")
+    # Use _html_table for rows ≤ 200 (always visible), st.dataframe for large sets
+    if len(_hfilt) <= 200:
+        _html_table(_hfilt)
+    else:
+        st.dataframe(_hfilt, use_container_width=True, hide_index=True, height=600)
+    st.caption(f"{len(_hfilt):,} of {len(_hrows):,} bets shown · auto-tracked and auto-settled")
