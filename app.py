@@ -564,7 +564,7 @@ if page == "EV Picks":
         and odds_lo <= p["dk_odds"] <= odds_hi
     ]
     _upcoming   = sorted(
-        [p for p in _qualifying if _commence_dt(p) > _now],
+        [p for p in _qualifying if _commence_dt(p) > _now and p.get("kelly_frac", 0) > 0],
         key=lambda p: _commence_dt(p)   # soonest first
     )
     _started    = sorted(
@@ -599,6 +599,9 @@ if page == "EV Picks":
         else:
             from data.news_monitor import injuries_for_teams as _inj_for
             for _i, _p in enumerate(_upcoming, 1):
+                # Skip any pick missing required fields to prevent broken card HTML
+                if not _p.get("model_prob") or not _p.get("implied_prob"):
+                    continue
                 _ev      = _p["ev_pct"]
                 _prob    = _p["model_prob"]
                 _conf    = _p["confidence"]
@@ -902,20 +905,20 @@ elif page == "Bankroll":
     _total_pnl  = sum(b.pnl_kelly or 0 for b in _real_mbets)   # real bets only for P&L
     _model_br   = _BASE_BANKROLL + _total_pnl
     _total_ret  = (_model_br - _BASE_BANKROLL) / _BASE_BANKROLL * 100
-    _wins_m     = sum(1 for b in _mbets if b.won)
-    _hit_m      = _wins_m / len(_mbets) if _mbets else 0
+    _wins_m     = sum(1 for b in _real_mbets if b.won)
+    _hit_m      = _wins_m / len(_real_mbets) if _real_mbets else 0
     _theo_ev    = sum((b.ev_pct or 0) / 100 * (b.stake_kelly or 0) for b in _real_mbets)
     with _bss() as _bs2:
         _open_count = _bs2.query(_BetM).filter(_BetM.settled == False).count()
 
-    _clv_bets   = [b for b in _mbets if b.clv is not None]
+    _clv_bets   = [b for b in _real_mbets if b.clv is not None]
     _avg_clv    = sum(b.clv for b in _clv_bets) / len(_clv_bets) if _clv_bets else None
     _beat_close = sum(1 for b in _clv_bets if b.clv > 0) / len(_clv_bets) if _clv_bets else None
 
     _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
     _k1.metric("Model Bankroll",  f"${_model_br:,.2f}", f"{_total_ret:+.1f}%")
     _k2.metric("Real P&L",        f"${_total_pnl:+.2f}", f"{len(_real_mbets)} real bets")
-    _k3.metric("Hit Rate",        f"{_hit_m:.1%}", f"{_wins_m}W – {len(_mbets)-_wins_m}L")
+    _k3.metric("Hit Rate",        f"{_hit_m:.1%}", f"{_wins_m}W – {len(_real_mbets)-_wins_m}L")
     _k4.metric("Avg CLV",         f"{_avg_clv:+.2f}%" if _avg_clv is not None else "—")
     _k5.metric("Beat Close %",    f"{_beat_close:.0%}" if _beat_close is not None else "—")
     _k6.metric("Open Bets",       str(_open_count))
@@ -924,7 +927,7 @@ elif page == "Bankroll":
     st.subheader("Daily Performance")
     _daily_pnl: dict = _dd(float)
     _daily_bets: dict = _dd(list)
-    for b in _mbets:
+    for b in _real_mbets:
         _d = _bet_date(b).date()
         _daily_pnl[_d] += (b.pnl_kelly or 0)
         _daily_bets[_d].append(b)
@@ -1046,6 +1049,7 @@ elif page == "Bankroll":
         ))
         _fig_clv.add_vline(x=0, line_dash="dash", line_color="#546e7a")
         if _avg_clv is not None:
+            _clv_col = "#00e676" if _avg_clv >= 0 else "#ff5252"
             _fig_clv.add_vline(x=_avg_clv, line_dash="dot", line_color=_clv_col,
                                annotation_text=f"avg {_avg_clv:+.2f}%")
         _fig_clv.update_layout(
@@ -1129,7 +1133,7 @@ elif page == "Bankroll":
     _col1, _col2 = st.columns(2)
     with _col1:
         _sp_pnl = _dd(float)
-        for b in _mbets:
+        for b in _real_mbets:
             _sp_pnl[b.sport] += (b.pnl_kelly or 0)
         _fig2 = px.bar(
             pd.DataFrame({"Sport": list(_sp_pnl), "P&L ($)": list(_sp_pnl.values())}),
@@ -1142,7 +1146,7 @@ elif page == "Bankroll":
 
     with _col2:
         _td: dict = {}
-        for b in _mbets:
+        for b in _real_mbets:
             _td.setdefault(b.bet_type, {"W": 0, "L": 0})
             _td[b.bet_type]["W" if b.won else "L"] += 1
         _fig3 = px.bar(
