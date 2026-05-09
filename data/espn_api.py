@@ -25,6 +25,7 @@ SPORT_MAP: dict[str, tuple[str, str]] = {
     "MLB": ("baseball", "mlb"),
     "NHL": ("hockey", "nhl"),
     "NFL": ("football", "nfl"),
+    "WNBA": ("basketball", "wnba"),
 }
 
 

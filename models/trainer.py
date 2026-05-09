@@ -31,8 +31,8 @@ _MIN_GAMES         = 200   # need this many games to bother training
 DEFAULT_YEARS_BACK = 3
 _ELO_K      = 20.0
 _ELO_HOME   = 50.0  # default home advantage in Elo points (overridden per sport)
-_SPORT_K    = {"NFL": 28, "NBA": 20, "MLB": 10, "NHL": 16}
-_SPORT_HA   = {"NFL": 70, "NBA": 35, "MLB": 18, "NHL": 28}
+_SPORT_K    = {"NFL": 28, "NBA": 20, "MLB": 10, "NHL": 16, "WNBA": 20}
+_SPORT_HA   = {"NFL": 70, "NBA": 35, "MLB": 18, "NHL": 28, "WNBA": 22}
 
 FEATURE_NAMES = [
     "elo_diff",           # home_elo + home_adv - away_elo  (pre-game)

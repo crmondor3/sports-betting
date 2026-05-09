@@ -172,7 +172,7 @@ _BASE_BANKROLL = 100.0  # All performance tracking starts from this baseline
 def _init_state():
     defaults = {
         "sport":       "All",
-        "ev_min":      20.0,
+        "ev_min":      5.0,
         "ev_min_odds": -250,
         "ev_max_odds":  400,
         "bankroll":    _BASE_BANKROLL,
@@ -274,10 +274,9 @@ with st.sidebar:
     st.markdown("### Filters")
     st.caption("Apply instantly — no recalculate needed.")
 
-    st.session_state["sport"] = st.selectbox(
-        "Sport", ["All", "NBA", "MLB", "NHL", "NFL"],
-        index=["All","NBA","MLB","NHL","NFL"].index(st.session_state["sport"]),
-    )
+    _sport_opts = ["All", "NBA", "MLB", "NHL", "NFL", "WNBA"]
+    _sport_idx  = _sport_opts.index(st.session_state["sport"]) if st.session_state["sport"] in _sport_opts else 0
+    st.session_state["sport"] = st.selectbox("Sport", _sport_opts, index=_sport_idx)
     st.session_state["ev_min"] = st.slider(
         "Min EV %", 1.0, 50.0,
         float(st.session_state["ev_min"]), 0.5, format="%.1f%%",

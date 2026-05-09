@@ -26,10 +26,12 @@ logger = logging.getLogger(__name__)
 #      home advantage is real but not as large as NFL.
 
 _SPORT_WEIGHTS: dict[str, dict[str, float]] = {
-    "NFL": {"elo": 0.38, "form": 0.15, "home_away": 0.22, "h2h": 0.15, "rest": 0.10},
-    "NBA": {"elo": 0.40, "form": 0.28, "home_away": 0.12, "h2h": 0.08, "rest": 0.12},
-    "MLB": {"elo": 0.32, "form": 0.14, "home_away": 0.16, "h2h": 0.22, "rest": 0.16},
-    "NHL": {"elo": 0.38, "form": 0.22, "home_away": 0.16, "h2h": 0.12, "rest": 0.12},
+    "NFL":  {"elo": 0.38, "form": 0.15, "home_away": 0.22, "h2h": 0.15, "rest": 0.10},
+    "NBA":  {"elo": 0.40, "form": 0.28, "home_away": 0.12, "h2h": 0.08, "rest": 0.12},
+    "MLB":  {"elo": 0.32, "form": 0.14, "home_away": 0.16, "h2h": 0.22, "rest": 0.16},
+    "NHL":  {"elo": 0.38, "form": 0.22, "home_away": 0.16, "h2h": 0.12, "rest": 0.12},
+    # WNBA: form-heavy like NBA, rest matters in condensed schedule, home adv is real
+    "WNBA": {"elo": 0.38, "form": 0.30, "home_away": 0.12, "h2h": 0.08, "rest": 0.12},
 }
 _DEFAULT_WEIGHTS = {"elo": 0.45, "form": 0.20, "home_away": 0.15, "h2h": 0.10, "rest": 0.10}
 
@@ -41,7 +43,7 @@ W_H2H       = _DEFAULT_WEIGHTS["h2h"]
 W_REST      = _DEFAULT_WEIGHTS["rest"]
 
 # Home advantage used when computing elo_diff for the GB model feature
-_SPORT_HOME_ADV_MAP: dict[str, float] = {"NFL": 70, "NBA": 35, "MLB": 18, "NHL": 28}
+_SPORT_HOME_ADV_MAP: dict[str, float] = {"NFL": 70, "NBA": 35, "MLB": 18, "NHL": 28, "WNBA": 22}
 
 
 @dataclass
@@ -330,4 +332,4 @@ def _clamp(p: float, lo: float = 0.02, hi: float = 0.98) -> float:
 
 
 def _league_avg_ppg(sport: str) -> float:
-    return {"NBA": 113.0, "MLB": 4.5, "NHL": 3.0, "NFL": 23.0}.get(sport.upper(), 100.0)
+    return {"NBA": 113.0, "MLB": 4.5, "NHL": 3.0, "NFL": 23.0, "WNBA": 82.0}.get(sport.upper(), 100.0)

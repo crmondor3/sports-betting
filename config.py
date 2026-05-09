@@ -44,6 +44,7 @@ SUPPORTED_SPORTS = {
     "NBA": "basketball_nba",
     "MLB": "baseball_mlb",
     "NHL": "icehockey_nhl",
+    "WNBA": "basketball_wnba",
 }
 
 MARKETS = ["h2h", "spreads", "totals"]
