@@ -69,6 +69,14 @@ _calibrator = st.session_state["calibrator"]
 # ── Global styles ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
+/* Force dark page background regardless of Streamlit Cloud theme setting */
+[data-testid="stAppViewContainer"] { background-color: #0e1117 !important; }
+[data-testid="stSidebar"]          { background-color: #111827 !important; }
+
+/* Force dataframe cells to use readable colours in dark mode */
+[data-testid="stDataFrame"] iframe { color-scheme: dark; }
+.stDataFrame { background-color: #1a2535 !important; }
+
 /* Card layout */
 .bet-card {
     background: #1a2535;
@@ -80,6 +88,19 @@ st.markdown("""
 .bet-card-high  { border-left: 5px solid #00e676; }
 .bet-card-med   { border-left: 5px solid #ffeb3b; }
 .bet-card-low   { border-left: 5px solid #78909c; }
+
+/* KPI panels */
+.kpi-panel {
+    background: #1a2535;
+    border: 1px solid #2d4060;
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+    align-items: center;
+}
 
 .tag {
     display: inline-block;
@@ -684,7 +705,7 @@ if page == "EV Picks":
   {_inj_html}
   {_cons_html}
 
-  <div style="margin-top:10px;padding:8px 12px;background:#0d1520;border-radius:6px;font-size:0.9rem;color:#cfd8dc;">
+  <div style="margin-top:10px;padding:8px 12px;background:#1e2d42;border-radius:6px;font-size:0.9rem;color:#cfd8dc;">
     Betting <b style="color:#fff;">{_bteam}</b> ({_blbl} {_sdisp} @ <b style="color:{_ev_col};">{_odds_s}</b>).
     Blended prob: <b style="color:{_ev_col};">{_prob:.1%}</b> vs DK implied {_p['implied_prob']:.1%}.
     Edge: <b style="color:{_ev_col};">+{_edge:.1f}%</b>
@@ -871,8 +892,7 @@ elif page == "Bankroll":
     _clv_col = ("#00e676" if (_avg_clv or 0) > 0 else "#ff5252") if _avg_clv is not None else "#78909c"
 
     st.markdown(f"""
-<div style="background:#0d1520;border-radius:12px;padding:20px 24px;margin-bottom:20px;
-            display:flex;gap:32px;flex-wrap:wrap;align-items:center;">
+<div class="kpi-panel">
   <div>
     <div style="color:#546e7a;font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;">Model Bankroll</div>
     <div style="font-size:2.4rem;font-weight:900;color:{_br_col};">${_model_br:,.2f}</div>
