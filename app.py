@@ -887,17 +887,19 @@ elif page == "Bankroll":
         [b for b in _all_settled if _bet_date(b).date() >= _br_start],
         key=_bet_date,
     )
-    _real_mbets = [b for b in _mbets if b.bookmaker != "espn_historical"]
+    _real_mbets = [
+        b for b in _mbets
+        if b.bookmaker != "espn_historical" and (b.ev_pct or 0) >= 15.0
+    ]
 
     with _br_hdr:
         st.caption(
-            f"Showing **{len(_mbets):,}** settled bets from {_br_start.isoformat()} onwards "
-            f"({len(_real_mbets):,} real, {len(_mbets)-len(_real_mbets):,} calibration). "
-            "Adjust the date to change the analysis window."
+            f"Showing **{len(_real_mbets):,}** high-EV bets (≥15% EV) from {_br_start.isoformat()} · "
+            f"{len([b for b in _mbets if b.bookmaker != 'espn_historical']):,} total real bets in range."
         )
 
-    if not _mbets:
-        st.info("No settled bets in the selected date range. Run **90-Day Backfill** in the sidebar or widen the date range.")
+    if not _real_mbets:
+        st.info("No bets with ≥15% EV in the selected date range. Widen the date range or run **90-Day Backfill**.")
         st.stop()
 
     # ── KPIs — native st.metric, always theme-compatible ──────────────────────
