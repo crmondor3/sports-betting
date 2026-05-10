@@ -35,9 +35,13 @@ init_db()
 # ── Start background scheduler (once per server process) ─────────────────────
 if "scheduler_started" not in st.session_state:
     try:
-        from data.scheduler import add_ml_update_job, add_weekly_retrain_job, start as _sched_start
+        from data.scheduler import (
+            add_ml_update_job, add_weekly_retrain_job,
+            add_daily_picks_alert_job, start as _sched_start,
+        )
         add_ml_update_job(hour=3, minute=0)
         add_weekly_retrain_job(day_of_week=6, hour=4, minute=0)
+        add_daily_picks_alert_job(hour=8, minute=30, ev_min=15.0)
         _sched_start()
     except Exception:
         pass
@@ -526,6 +530,16 @@ else:
             # Force calibrator rebuild with fresh data
             if "calibrator" in st.session_state:
                 del st.session_state["calibrator"]
+            # Send Telegram alert for today's new picks (fires once when cache resets)
+            if "telegram_sent_today" not in st.session_state:
+                try:
+                    from alerts.telegram_alert import TelegramAlert as _TGA
+                    _tg = _TGA()
+                    if _tg.enabled:
+                        _tg.send_picks(_all_dicts, _effective_bankroll, ev_min=15.0)
+                    st.session_state["telegram_sent_today"] = True
+                except Exception:
+                    pass
 
     except Exception as _pe:
         _pipe_error = str(_pe)

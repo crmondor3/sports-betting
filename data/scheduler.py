@@ -41,7 +41,47 @@ def add_daily_summary_job(callback: Callable, hour: int = 8, minute: int = 0):
         trigger=CronTrigger(hour=hour, minute=minute),
         id="daily_summary",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
+
+
+def add_daily_picks_alert_job(hour: int = 8, minute: int = 30, ev_min: float = 15.0) -> None:
+    """
+    Daily 8:30 AM ET job: run the picks pipeline and send qualifying picks
+    via Telegram. Silently skips if Telegram is not configured.
+    """
+    def _alert() -> None:
+        try:
+            from alerts.telegram_alert import TelegramAlert
+            bot = TelegramAlert()
+            if not bot.enabled:
+                return
+            logger.info("Daily picks alert starting…")
+            import config as cfg
+            cfg.EV_THRESHOLD  = -1.0
+            cfg.MIN_CONFIDENCE = 0
+            cfg.MAX_PICKS_PER_DAY = 500
+            from run import run_pipeline
+            from tracker.bankroll import BankrollTracker
+            picks, _, _ = run_pipeline()
+            picks_dicts = [p.to_dict() for p in picks]
+            bankroll = BankrollTracker().get_current_bankroll()
+            sent = bot.send_picks(picks_dicts, bankroll, ev_min=ev_min)
+            logger.info("Daily picks alert sent=%s (%d picks)", sent, len(picks_dicts))
+        except Exception as exc:
+            logger.error("Daily picks alert failed: %s", exc)
+
+    sched = get_scheduler()
+    sched.add_job(
+        _alert,
+        trigger=CronTrigger(hour=hour, minute=minute),
+        id="daily_picks_alert",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info("Daily picks alert scheduled at %02d:%02d ET", hour, minute)
 
 
 def add_clv_settlement_job(callback: Callable, hour: int = 23, minute: int = 55):
