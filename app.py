@@ -176,7 +176,7 @@ _BASE_BANKROLL = 100.0  # All performance tracking starts from this baseline
 def _init_state():
     defaults = {
         "sport":       "All",
-        "ev_min":      5.0,
+        "ev_min":      20.0,
         "ev_min_odds": -250,
         "ev_max_odds":  400,
         "bankroll":    _BASE_BANKROLL,
@@ -1255,7 +1255,7 @@ elif page == "ML Picks":
             key="ml_sport_select",
         )
     with _ml_col2:
-        _ml_min_edge_pct = st.slider("Min Edge %", 1.0, 15.0, 3.0, 0.5,
+        _ml_min_edge_pct = st.slider("Min Edge %", 1.0, 30.0, 20.0, 0.5,
                                      format="%.1f%%", key="ml_edge_slider")
     _ml_min_edge = _ml_min_edge_pct / 100.0
 
