@@ -1,31 +1,50 @@
-"""Central configuration loaded from .env."""
+"""
+Central configuration.
+
+Priority order for every value:
+  1. Streamlit secrets  (st.secrets) — used on Streamlit Cloud
+  2. Environment variable / .env     — used locally or in CLI scripts
+"""
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
+
+def _secret(key: str, default: str = "") -> str:
+    """Return value from st.secrets (cloud) or os.getenv (local), in that order."""
+    try:
+        import streamlit as st
+        val = st.secrets.get(key)
+        if val is not None:
+            return str(val)
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
 # ── API Keys ──────────────────────────────────────────────────────────────────
-ODDS_API_KEY: str = os.getenv("ODDS_API_KEY", "")
-TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
-EMAIL_SENDER: str = os.getenv("EMAIL_SENDER", "")
-EMAIL_PASSWORD: str = os.getenv("EMAIL_PASSWORD", "")
-EMAIL_RECIPIENT: str = os.getenv("EMAIL_RECIPIENT", "")
+ODDS_API_KEY: str = _secret("ODDS_API_KEY")
+TELEGRAM_BOT_TOKEN: str = _secret("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID: str = _secret("TELEGRAM_CHAT_ID")
+EMAIL_SENDER: str = _secret("EMAIL_SENDER")
+EMAIL_PASSWORD: str = _secret("EMAIL_PASSWORD")
+EMAIL_RECIPIENT: str = _secret("EMAIL_RECIPIENT")
 
 # ── Bankroll ──────────────────────────────────────────────────────────────────
-STARTING_BANKROLL: float = float(os.getenv("STARTING_BANKROLL", "1000.00"))
-DEFAULT_KELLY_FRACTION: float = float(os.getenv("DEFAULT_KELLY_FRACTION", "0.25"))
+STARTING_BANKROLL: float = float(_secret("STARTING_BANKROLL", "1000.00"))
+DEFAULT_KELLY_FRACTION: float = float(_secret("DEFAULT_KELLY_FRACTION", "0.25"))
 
 # ── Model Thresholds ─────────────────────────────────────────────────────────
 # Raised from 3% → 5%: fewer bets, only high-conviction edges
-EV_THRESHOLD: float = float(os.getenv("EV_THRESHOLD", "0.05"))
-MAX_KELLY: float = float(os.getenv("MAX_KELLY", "0.08"))
-MIN_CONFIDENCE: int = int(os.getenv("MIN_CONFIDENCE", "55"))  # 0-100
-MAX_PICKS_PER_DAY: int = int(os.getenv("MAX_PICKS_PER_DAY", "10"))
+EV_THRESHOLD: float = float(_secret("EV_THRESHOLD", "0.05"))
+MAX_KELLY: float = float(_secret("MAX_KELLY", "0.08"))
+MIN_CONFIDENCE: int = int(_secret("MIN_CONFIDENCE", "55"))  # 0-100
+MAX_PICKS_PER_DAY: int = int(_secret("MAX_PICKS_PER_DAY", "10"))
 
 # ── Database ──────────────────────────────────────────────────────────────────
-DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///sports_betting.db")
+DATABASE_URL: str = _secret("DATABASE_URL", "sqlite:///sports_betting.db")
 
 # ── The Odds API ──────────────────────────────────────────────────────────────
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"

@@ -10,3 +10,9 @@ __pycache__/
 .venv/
 venv/
 .streamlit/secrets.toml
+# Trained model binaries — regenerated on first run
+models/*.pkl
+# Generated output files
+reports/
+draftkings_predictions.csv
+bets/
