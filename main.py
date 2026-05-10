@@ -13,6 +13,20 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+
+# Guard: prevent Streamlit from executing the CLI pipeline.
+# Streamlit sets __name__ == "__main__" when it runs any file, so the
+# normal `if __name__ == "__main__"` guard is not enough.
+# If this file is being run by `streamlit run`, exit immediately with
+# a clear message pointing to the correct entry point.
+if any("streamlit" in arg for arg in sys.argv):
+    print(
+        "\n[ERROR] Streamlit is running main.py instead of app.py.\n"
+        "Fix: go to your Streamlit Cloud app → Settings → "
+        "change 'Main file path' to app.py\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 from datetime import datetime
 from pathlib import Path
 
