@@ -266,7 +266,7 @@ with st.sidebar:
 
     page = st.radio(
         "Page",
-        ["EV Picks", "Bankroll", "Bet History"],
+        ["EV Picks", "ML Picks", "Bankroll", "Bet History"],
         label_visibility="collapsed",
     )
 
@@ -1210,3 +1210,227 @@ elif page == "Bet History":
     else:
         st.dataframe(_hfilt, use_container_width=True, hide_index=True, height=600)
     st.caption(f"{len(_hfilt):,} of {len(_hrows):,} bets shown · auto-tracked and auto-settled")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: ML Picks  — XGBoost / LightGBM / LogReg ensemble
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif page == "ML Picks":
+    from dataclasses import asdict
+    from model_trainer import ModelTrainer
+    from feature_engineer import FeatureEngineer
+
+    st.title("ML Picks  ·  XGBoost / LightGBM Ensemble")
+    st.caption(
+        "Three-model ensemble (XGBoost + LightGBM + Logistic Regression) trained on ESPN game history. "
+        "Bets flagged where the ensemble probability beats DraftKings implied probability by the edge threshold."
+    )
+
+    # Sport selector — default to NFL when "All" is selected
+    _ml_sport = st.session_state.get("sport", "NFL")
+    if _ml_sport == "All":
+        _ml_sport = "NFL"
+
+    _ml_col1, _ml_col2 = st.columns([2, 1])
+    with _ml_col1:
+        _ml_sport = st.selectbox(
+            "Sport", ["NFL", "NBA", "MLB", "NHL", "WNBA"],
+            index=["NFL", "NBA", "MLB", "NHL", "WNBA"].index(_ml_sport)
+            if _ml_sport in ["NFL", "NBA", "MLB", "NHL", "WNBA"] else 0,
+            key="ml_sport_select",
+        )
+    with _ml_col2:
+        _ml_min_edge_pct = st.slider("Min Edge %", 1.0, 15.0, 3.0, 0.5,
+                                     format="%.1f%%", key="ml_edge_slider")
+    _ml_min_edge = _ml_min_edge_pct / 100.0
+
+    st.divider()
+
+    # ── Model status ──────────────────────────────────────────────────────────
+    _ml_trainer = ModelTrainer(sport=_ml_sport)
+    _mc1, _mc2, _mc3 = st.columns(3)
+    _any_ml_trained = False
+
+    for _mkt, _mcol in [("h2h", _mc1), ("spreads", _mc2), ("totals", _mc3)]:
+        with _mcol:
+            if _ml_trainer.is_trained(_mkt):
+                _any_ml_trained = True
+                _bndl = _ml_trainer.load(_mkt)
+                _mtx  = _bndl.get("metrics", {})
+                st.success(f"**{_mkt.upper()}** ready")
+                st.caption(f"n={_bndl.get('n_train', 0):,} · {_bndl.get('trained_at', '?')[:10]}")
+                if _mtx.get("xgboost_auc"):
+                    st.caption(
+                        f"AUC xgb={_mtx['xgboost_auc']:.3f} "
+                        f"lgb={_mtx.get('lightgbm_auc', 0):.3f} "
+                        f"lr={_mtx.get('logreg_auc', 0):.3f}"
+                    )
+            else:
+                st.warning(f"**{_mkt.upper()}** not trained")
+
+    # ── Train button ──────────────────────────────────────────────────────────
+    _train_col, _shap_col = st.columns([3, 1])
+    with _train_col:
+        _do_train = st.button(
+            f"Train ML Models for {_ml_sport}  (3 seasons, ~2 min)",
+            use_container_width=True,
+            type="primary" if not _any_ml_trained else "secondary",
+        )
+    with _shap_col:
+        _show_shap = st.checkbox("Show SHAP", value=False, help="Display top feature importances after training.")
+
+    if _do_train:
+        if not config.ODDS_API_KEY:
+            st.error("ODDS_API_KEY is required to fetch training data.")
+        else:
+            _ml_prog = st.empty()
+            try:
+                with st.spinner(f"Fetching {_ml_sport} game history…"):
+                    from data.season_fetcher import fetch_all_historical_games as _fhg
+                    _ml_games = _fhg(
+                        _ml_sport, years_back=3,
+                        progress_cb=lambda m: _ml_prog.caption(m),
+                    )
+                _ml_prog.caption(f"Building feature matrix from {len(_ml_games):,} games…")
+                _fe = FeatureEngineer(sport=_ml_sport)
+                _ml_df = _fe.build(_ml_games)
+                if "dk_home_spread" in _ml_df.columns:
+                    _ml_df["spread_win"] = _fe.make_spread_target(_ml_df)
+                if "dk_total" in _ml_df.columns:
+                    _ml_df["over_hit"] = _fe.make_totals_target(_ml_df)
+
+                for _mkt in ("h2h", "spreads", "totals"):
+                    _ml_prog.caption(f"Training {_mkt} model (no Optuna — use CLI for full tuning)…")
+                    _res = _ml_trainer.fit(_ml_df, market=_mkt, use_optuna=False)
+                    if "error" not in _res:
+                        _m = _res
+                        st.success(
+                            f"**{_mkt.upper()}** trained on {_res.get('n_train', 0):,} rows · "
+                            f"AUC xgb={_m.get('xgboost_auc', 0):.3f} "
+                            f"lgb={_m.get('lightgbm_auc', 0):.3f}"
+                        )
+                        if _show_shap and _res.get("shap_top_features"):
+                            _shap_rows = [{"Feature": f, "Importance": f"{v:.4f}"}
+                                          for f, v in _res["shap_top_features"]]
+                            st.caption("Top SHAP features:")
+                            _html_table(pd.DataFrame(_shap_rows))
+                    else:
+                        st.warning(f"{_mkt}: {_res.get('error')}")
+                _ml_prog.empty()
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as _te:
+                _ml_prog.empty()
+                st.error(f"Training error: {_te}")
+
+    # ── Live picks ────────────────────────────────────────────────────────────
+    if not _any_ml_trained:
+        st.info("Click **Train ML Models** above to build the ensemble. Takes ~2 minutes on first run.")
+        st.stop()
+
+    st.divider()
+    st.subheader(f"Today's ML Value Bets — {_ml_sport}")
+
+    if not config.ODDS_API_KEY:
+        st.error("ODDS_API_KEY not set — add it to Streamlit secrets.")
+        st.stop()
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _get_ml_picks(sport: str, min_edge: float, bankroll: float) -> list[dict]:
+        from data.season_fetcher import fetch_all_historical_games as _fhg2
+        from data.odds_api import OddsAPIClient
+        from bet_selector import BetSelector
+
+        sport_key = config.SUPPORTED_SPORTS.get(sport.upper())
+        if not sport_key:
+            return []
+        games = _fhg2(sport, years_back=3)
+        with OddsAPIClient() as _client:
+            odds_games = _client.get_odds(sport_key)
+        selector = BetSelector(sport=sport, bankroll=bankroll, min_edge=min_edge)
+        return [asdict(b) for b in selector.analyze(odds_games, games)]
+
+    with st.spinner("Fetching DraftKings odds and running ensemble…"):
+        try:
+            _ml_bets = _get_ml_picks(_ml_sport, _ml_min_edge, bankroll_val)
+        except Exception as _mlpe:
+            st.error(f"Could not fetch picks: {_mlpe}")
+            _ml_bets = []
+
+    if not _ml_bets:
+        st.warning(
+            f"No qualifying ML value bets for {_ml_sport} at {_ml_min_edge_pct:.1f}% edge. "
+            "Try lowering the Min Edge % slider, or there may be no games scheduled today."
+        )
+        st.stop()
+
+    # KPI row
+    _mlk1, _mlk2, _mlk3, _mlk4 = st.columns(4)
+    _mlk1.metric("Value Bets Found", len(_ml_bets))
+    _mlk2.metric("Avg Edge", f"{sum(b['edge_pct'] for b in _ml_bets)/len(_ml_bets):.1f}%")
+    _mlk3.metric("Avg EV", f"{sum(b['ev'] for b in _ml_bets)/len(_ml_bets):.1f}%")
+    _mlk4.metric("Total Stake", f"${sum(b['kelly_stake'] for b in _ml_bets):.2f}")
+
+    st.divider()
+
+    # Bet cards
+    for _mlb in _ml_bets:
+        _mlev     = _mlb["ev"]
+        _mledge   = _mlb["edge_pct"]
+        _mlconf   = _mlb["confidence"]
+        _mlodds   = _mlb["dk_odds"]
+        _mlodds_s = f"+{_mlodds:.0f}" if _mlodds >= 0 else f"{_mlodds:.0f}"
+        _mlev_col = _ev_color(_mlev)
+        _ml_card  = _card_class(_mlconf)
+        _mline_s  = f" {_mlb['dk_line']:+.1f}" if _mlb.get("dk_line") else ""
+        _mlmkt    = _mlb["market"].replace("h2h", "Moneyline").replace("spreads", "Spread").replace("totals", "Total")
+        _mlside   = _mlb["side"].upper()
+
+        st.markdown(f"""
+<div class="{_ml_card}">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span class="tag tag-sport">{_mlb['sport']}</span>
+      <span class="tag tag-type">{_mlmkt}</span>
+      <span style="font-size:1.05rem;font-weight:700;color:#cfd8dc;">
+        {_mlb['away_team']} @ {_mlb['home_team']}
+      </span>
+    </div>
+    <span style="background:#1e3a5f;color:#90caf9;padding:2px 12px;border-radius:20px;
+                 font-size:0.82rem;font-weight:700;">
+      Conf {_mlconf}
+    </span>
+  </div>
+  <div style="margin-top:12px;display:flex;gap:24px;flex-wrap:wrap;font-size:0.9rem;">
+    <div>
+      <div style="color:#78909c;font-size:0.75rem;">BET</div>
+      <div style="font-weight:700;color:#fff;">{_mlside}{_mline_s} &nbsp;
+        <span style="color:{_mlev_col};">{_mlodds_s}</span>
+      </div>
+    </div>
+    <div>
+      <div style="color:#78909c;font-size:0.75rem;">MODEL PROB</div>
+      <div style="font-weight:700;color:#fff;">{_mlb['model_prob']:.1%}</div>
+    </div>
+    <div>
+      <div style="color:#78909c;font-size:0.75rem;">DK IMPLIED</div>
+      <div style="color:#90a4ae;">{_mlb['dk_implied']:.1%}</div>
+    </div>
+    <div>
+      <div style="color:#78909c;font-size:0.75rem;">EDGE</div>
+      <div style="font-weight:700;color:{_mlev_col};">+{_mledge:.1f}%</div>
+    </div>
+    <div>
+      <div style="color:#78909c;font-size:0.75rem;">EV</div>
+      <div style="font-weight:700;color:{_mlev_col};">{_mlev:+.1f}%</div>
+    </div>
+    <div>
+      <div style="color:#78909c;font-size:0.75rem;">KELLY STAKE</div>
+      <div style="font-weight:700;color:#fff;">${_mlb['kelly_stake']:.2f}
+        <span style="color:#78909c;font-size:0.8rem;">({_mlb['kelly_frac']:.1f}%)</span>
+      </div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
