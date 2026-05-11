@@ -344,11 +344,6 @@ with st.sidebar:
     else:
         st.error("API Key missing — add ODDS_API_KEY to .env or Streamlit secrets")
 
-    any_cached = any(
-        is_cached(f"dk_odds_v3_{v}") for v in config.SUPPORTED_SPORTS.values()
-    )
-    st.success("Odds: cached today") if any_cached else st.warning("Odds: not fetched yet")
-
     if st.button("Force Refresh Odds", use_container_width=True,
                  help="Burns ~4 API requests. Fetches fresh DraftKings lines."):
         if not config.ODDS_API_KEY:
