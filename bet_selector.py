@@ -306,7 +306,7 @@ class BetSelector:
         print(sep)
 
     def save_csv(self, bets: list[ValueBet], path: Path = _PREDICTIONS_CSV) -> None:
-        """Save all bets (not just top-N) to CSV."""
+        """Save all bets (not just top-N) to CSV and persist to DB for outcome tracking."""
         if not bets:
             logger.info("No bets to save.")
             return
@@ -316,6 +316,12 @@ class BetSelector:
             for b in bets:
                 writer.writerow(asdict(b))
         logger.info("Saved %d predictions to %s", len(bets), path)
+
+        try:
+            from outcome_tracker import OutcomeTracker
+            OutcomeTracker().save_picks(bets)
+        except Exception as exc:
+            logger.debug("Outcome tracker save skipped: %s", exc)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

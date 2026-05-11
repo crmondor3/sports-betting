@@ -111,6 +111,15 @@ class ESPNClient:
         self._http = httpx.Client(timeout=15)
         self._team_id_cache: dict[str, dict[str, int]] = {}  # sport → {name: id}
 
+    def close(self) -> None:
+        self._http.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
     def _get(self, url: str, params: dict | None = None) -> Any:
         r = self._http.get(url, params=params or {})
         r.raise_for_status()

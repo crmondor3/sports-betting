@@ -323,20 +323,37 @@ class Backtester:
     def _pick_side_h2h(
         model_prob: float, home_odds: float, away_odds: float
     ) -> tuple[str | None, float, float]:
-        """Return (side, model_prob_for_side, dk_odds) for the stronger edge."""
-        return "home", model_prob, home_odds
+        """Return (side, model_prob_for_side, dk_odds) for the side with better edge."""
+        away_prob  = 1.0 - model_prob
+        home_impl  = _no_vig_single(home_odds, away_odds, "home")
+        away_impl  = _no_vig_single(home_odds, away_odds, "away")
+        if (model_prob - home_impl) >= (away_prob - away_impl):
+            return "home", model_prob, home_odds
+        return "away", away_prob, away_odds
 
     @staticmethod
     def _pick_side_spreads(
         model_prob: float, home_odds: float, away_odds: float
     ) -> tuple[str | None, float, float]:
-        return "home", model_prob, home_odds
+        """Return spread side with better edge."""
+        away_prob  = 1.0 - model_prob
+        home_impl  = _no_vig_single(home_odds, away_odds, "home")
+        away_impl  = _no_vig_single(home_odds, away_odds, "away")
+        if (model_prob - home_impl) >= (away_prob - away_impl):
+            return "home", model_prob, home_odds
+        return "away", away_prob, away_odds
 
     @staticmethod
     def _pick_side_totals(
         model_prob: float, over_odds: float, under_odds: float
     ) -> tuple[str | None, float, float]:
-        return "over", model_prob, over_odds
+        """Return over/under side with better edge."""
+        under_prob = 1.0 - model_prob
+        over_impl  = _no_vig_single(over_odds, under_odds, "over")
+        under_impl = _no_vig_single(over_odds, under_odds, "away")
+        if (model_prob - over_impl) >= (under_prob - under_impl):
+            return "over", model_prob, over_odds
+        return "under", under_prob, under_odds
 
     @staticmethod
     def _determine_win(row: pd.Series, market: str, side: str) -> bool:

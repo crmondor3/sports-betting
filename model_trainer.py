@@ -225,7 +225,6 @@ class ModelTrainer:
                     "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
                     "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
                     "reg_alpha":       trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-                    "use_label_encoder": False,
                     "eval_metric": "logloss",
                     "random_state": 42,
                 }
@@ -248,7 +247,7 @@ class ModelTrainer:
         import xgboost as xgb
         defaults = {
             "max_depth": 4, "learning_rate": 0.05, "n_estimators": 300,
-            "subsample": 0.8, "colsample_bytree": 0.8, "use_label_encoder": False,
+            "subsample": 0.8, "colsample_bytree": 0.8,
             "eval_metric": "logloss", "random_state": 42,
         }
         defaults.update(params)
@@ -363,7 +362,7 @@ class ModelTrainer:
                 metrics[f"{name}_auc"]    = round(roc_auc_score(y[val_idx], proba), 4)
                 metrics[f"{name}_brier"]  = round(brier_score_loss(y[val_idx], proba), 5)
                 metrics[f"{name}_logloss"] = round(log_loss(y[val_idx], proba), 5)
-                metrics[f"{name}_acc"]    = round(float((proba >= 0.5) == y[val_idx]).mean(), 4)
+                metrics[f"{name}_acc"]    = round(float(((proba >= 0.5) == y[val_idx]).mean()), 4)
             except Exception as exc:
                 logger.warning("Eval failed for %s: %s", name, exc)
 

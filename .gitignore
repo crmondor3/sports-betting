@@ -12,6 +12,9 @@ venv/
 .streamlit/secrets.toml
 # Trained model binaries — regenerated on first run
 models/*.pkl
+# Claude Code memory / project config
+.claude/
+
 # Generated output files
 reports/
 draftkings_predictions.csv
