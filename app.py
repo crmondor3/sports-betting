@@ -5,7 +5,7 @@ Run: streamlit run app.py
 from __future__ import annotations
 
 import sys
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -534,7 +534,7 @@ if page == "EV Picks":
         and odds_lo <= p["dk_odds"] <= odds_hi
     ]
     _upcoming = sorted(
-        [p for p in _qualifying if _commence_dt(p) > _now],
+        [p for p in _qualifying if _now < _commence_dt(p) < _now + timedelta(days=2)],
         key=lambda p: (-p["ev_pct"], _commence_dt(p)),   # highest EV first
     )
     _started = sorted(
@@ -702,8 +702,6 @@ if page == "EV Picks":
       <span style="background:#1e3a5f;color:#90caf9;border-radius:50%;width:28px;height:28px;
                    display:inline-flex;align-items:center;justify-content:center;
                    font-weight:800;font-size:0.9rem;flex-shrink:0;">#{_i}</span>
-      <span class="tag tag-sport">{_p['sport']}</span>
-      <span class="tag {'tag-watch' if is_watch else 'tag-type'}">{_blbl}</span>
       <span style="font-size:1.15rem;font-weight:800;color:#ffffff;margin-left:4px;">{_p['game']}</span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
