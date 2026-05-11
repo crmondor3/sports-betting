@@ -539,7 +539,7 @@ if page == "EV Picks":
 
     # KPI row
     _active_with_stake = [p for p in _upcoming if p.get("kelly_frac", 0) > 0]
-    _total_stake       = sum(round(_effective_bankroll * p["kelly_frac"], 2) for p in _active_with_stake)
+    _total_stake       = sum(round(bankroll_val * p["kelly_frac"], 2) for p in _active_with_stake)
     _avg_ev            = sum(p["ev_pct"] for p in _upcoming) / len(_upcoming) if _upcoming else 0
     _avg_edge          = sum(
         (p["model_prob"] - p["implied_prob"]) * 100 for p in _upcoming
@@ -592,7 +592,7 @@ if page == "EV Picks":
                 _odds    = _p["dk_odds"]
                 _odds_s  = _odds_str(_odds)
                 _frac    = _p.get("kelly_frac", 0)
-                _stake   = round(_effective_bankroll * _frac, 2) if _frac > 0 else 0
+                _stake   = round(bankroll_val * _frac, 2) if _frac > 0 else 0
                 _to_win  = round(_stake * (_american_to_decimal(_odds) - 1), 2) if _stake > 0 else 0
                 _be_rate = _be_win_rate(_odds)
                 _bteam   = _p.get("bet_team", _p["side"])
