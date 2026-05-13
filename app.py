@@ -915,6 +915,7 @@ elif page == "Bankroll":
 
     with _bss() as _bs:
         _all_settled = _bs.query(_BetM).filter(_BetM.settled == True).all()
+        _all_open    = _bs.query(_BetM).filter(_BetM.settled == False).all()
 
     def _bet_date(b) -> datetime:
         return b.settled_at or b.placed_at or b.commence_time or datetime(2000, 1, 1)
@@ -925,20 +926,53 @@ elif page == "Bankroll":
     )
     _real_mbets = [
         b for b in _mbets
-        if b.bookmaker != "espn_historical" and (b.ev_pct or 0) >= ev_min_filter
+        if b.bookmaker != "espn_historical"
     ]
+    _open_bets = sorted(
+        [b for b in _all_open if b.bookmaker != "espn_historical"],
+        key=lambda b: b.commence_time or datetime(2000, 1, 1),
+    )
 
     with _br_hdr:
         st.caption(
-            f"**{len(_real_mbets):,}** bets (≥{ev_min_filter:.1f}% EV) from {_br_start.isoformat()} · "
-            f"{len([b for b in _mbets if b.bookmaker != 'espn_historical']):,} total real bets in range."
+            f"**{len(_real_mbets):,}** settled bets from {_br_start.isoformat()} · "
+            f"**{len(_open_bets):,}** pending"
         )
 
-    if not _real_mbets:
+    if not _real_mbets and not _open_bets:
         st.info(
-            f"No bets with ≥{ev_min_filter:.1f}% EV in the selected range. "
-            "Widen the date range or lower Min EV% in the sidebar."
+            "No bets tracked yet. Pick up some bets from the EV Picks tab — "
+            "they are auto-logged and will appear here once games complete."
         )
+        st.stop()
+
+    # Show pending bets prominently when no settled history exists
+    if _open_bets:
+        _pb_label = f"Pending Bets ({len(_open_bets)})"
+        with st.expander(_pb_label, expanded=not _real_mbets):
+            for _ob in _open_bets:
+                _ob_time = _ob.commence_time
+                _ob_time_str = _ob_time.astimezone(_ET).strftime("%a %b %-d %I:%M %p ET") if _ob_time and hasattr(_ob_time, "astimezone") else str(_ob_time or "")
+                _ob_side = _ob.side or _ob.bet_type or ""
+                _ob_odds = f"{_ob.dk_odds:+d}" if _ob.dk_odds else "—"
+                _ob_ev   = f"{_ob.ev_pct:+.1f}%" if _ob.ev_pct else "—"
+                _ob_stake = f"${_ob.stake_kelly:.2f}" if _ob.stake_kelly else "—"
+                st.markdown(
+                    f'<div style="background:#0d1f35;border:1px solid #1e3a5f;border-radius:6px;'
+                    f'padding:8px 14px;margin-bottom:6px;font-size:0.85rem;">'
+                    f'<b style="color:#fff;">{_ob.game or "—"}</b>'
+                    f'<span style="color:#90a4ae;font-size:0.8rem;margin-left:8px;">{_ob_time_str}</span><br>'
+                    f'<span style="color:#64b5f6;">{_ob_side}</span> &nbsp;·&nbsp; '
+                    f'<span style="color:#fff;">{_ob_odds}</span> &nbsp;·&nbsp; '
+                    f'EV <span style="color:#00e676;">{_ob_ev}</span> &nbsp;·&nbsp; '
+                    f'Stake <b>{_ob_stake}</b> &nbsp;·&nbsp; '
+                    f'<span style="color:#78909c;">{(_ob.sport or "").upper()}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    if not _real_mbets:
+        st.info("No settled bets yet — check back after your pending games complete.")
         st.stop()
 
     # KPIs
@@ -954,9 +988,6 @@ elif page == "Bankroll":
     _avg_clv    = sum(b.clv for b in _clv_bets) / len(_clv_bets) if _clv_bets else None
     _beat_close = sum(1 for b in _clv_bets if b.clv > 0) / len(_clv_bets) if _clv_bets else None
 
-    with _bss() as _bs2:
-        _open_count = _bs2.query(_BetM).filter(_BetM.settled == False).count()
-
     _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
     _k1.metric("ROI",          f"{_roi_m:+.1f}%",   f"{_total_pnl:+.2f} P&L")
     _k2.metric("Hit Rate",     f"{_hit_m:.1%}",      f"{_wins_m}W – {len(_real_mbets)-_wins_m}L")
@@ -964,7 +995,7 @@ elif page == "Bankroll":
     _k4.metric("Avg EV",       f"{_avg_ev_m:.1f}%",  f"{len(_real_mbets)} bets")
     _k5.metric("Avg CLV",      f"{_avg_clv:+.2f}%" if _avg_clv is not None else "—",
                help="Closing line value — the gold standard for long-term edge proof.")
-    _k6.metric("Open Bets",    str(_open_count))
+    _k6.metric("Open Bets",    str(len(_open_bets)))
 
     # ROI is the #1 professional metric — explain it
     _roi_col = "#00e676" if _roi_m >= 0 else "#ff5252"
