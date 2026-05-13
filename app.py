@@ -7,6 +7,9 @@ from __future__ import annotations
 import sys
 from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -546,10 +549,16 @@ if page == "EV Picks":
         if p["ev_pct"] >= ev_min_filter
         and odds_lo <= p["dk_odds"] <= odds_hi
     ]
-    _today_date = _now.date()
+    # Use ET date for "today/tomorrow" bucketing — an 8 PM ET game is midnight UTC
+    # (next calendar day in UTC), so UTC date comparisons mis-bucket evening games.
+    _today_et = datetime.now(_ET).date()
+
+    def _et_date(p: dict) -> date:
+        return _commence_dt(p).astimezone(_ET).date()
+
     _upcoming = sorted(
         [p for p in _qualifying if _now < _commence_dt(p) < _now + timedelta(days=2)],
-        key=lambda p: ((_commence_dt(p).date() - _today_date).days, -p["ev_pct"]),
+        key=lambda p: ((_et_date(p) - _today_et).days, -p["ev_pct"]),
     )
     _started = sorted(
         [p for p in _qualifying if _commence_dt(p) <= _now],
