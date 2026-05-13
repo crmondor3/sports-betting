@@ -178,6 +178,15 @@ def _html_table(df: pd.DataFrame) -> None:
 _KELLY        = 0.25
 _BASE_BANKROLL = 100.0
 
+_LEAGUE_DISPLAY = {
+    "NFL": "NFL", "NCAAF": "NCAAF", "NBA": "NBA", "WNBA": "WNBA",
+    "NCAAB": "NCAAB", "MLB": "MLB", "NHL": "NHL",
+    "MLS": "MLS", "EPL": "EPL", "LALIGA": "La Liga",
+    "BUNDESLIGA": "Bundesliga", "SERIEA": "Serie A", "LIGUE1": "Ligue 1",
+    "UCL": "UCL", "UEL": "UEL", "LIGAMX": "Liga MX",
+    "MMA": "MMA", "BOXING": "Boxing",
+}
+
 def _init_state():
     defaults = {
         "sport":       "All",
@@ -735,7 +744,7 @@ if page == "EV Picks":
       <span style="background:#1e3a5f;color:#90caf9;border-radius:50%;width:28px;height:28px;
                    display:inline-flex;align-items:center;justify-content:center;
                    font-weight:800;font-size:0.9rem;flex-shrink:0;">#{_i}</span>
-      <span style="font-size:1.15rem;font-weight:800;color:#ffffff;margin-left:4px;">{_p['game']}</span>
+      <span style="font-size:1.15rem;font-weight:800;color:#ffffff;margin-left:4px;">{_p['game']} <span style="color:#90a4ae;font-size:0.88rem;font-weight:500;">({_LEAGUE_DISPLAY.get(_p.get('sport',''), _p.get('sport',''))})</span></span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
       <span style="background:{_tbcol}22;color:{_tbcol};border:1px solid {_tbcol};
