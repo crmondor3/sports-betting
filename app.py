@@ -952,15 +952,19 @@ elif page == "Bankroll":
         with st.expander(_pb_label, expanded=not _real_mbets):
             for _ob in _open_bets:
                 _ob_time = _ob.commence_time
-                _ob_time_str = _ob_time.astimezone(_ET).strftime("%a %b %-d %I:%M %p ET") if _ob_time and hasattr(_ob_time, "astimezone") else str(_ob_time or "")
-                _ob_side = _ob.side or _ob.bet_type or ""
-                _ob_odds = f"{_ob.dk_odds:+d}" if _ob.dk_odds else "—"
-                _ob_ev   = f"{_ob.ev_pct:+.1f}%" if _ob.ev_pct else "—"
+                try:
+                    _ob_time_str = _ob_time.replace(tzinfo=timezone.utc).astimezone(_ET).strftime("%a %b %d %I:%M %p ET") if _ob_time else ""
+                except Exception:
+                    _ob_time_str = str(_ob_time or "")
+                _ob_game  = f"{_ob.away_team} @ {_ob.home_team}"
+                _ob_side  = f"{_ob.bet_type}/{_ob.side}"
+                _ob_odds  = f"{int(_ob.odds):+d}" if _ob.odds else "—"
+                _ob_ev    = f"{_ob.ev_pct:+.1f}%" if _ob.ev_pct else "—"
                 _ob_stake = f"${_ob.stake_kelly:.2f}" if _ob.stake_kelly else "—"
                 st.markdown(
                     f'<div style="background:#0d1f35;border:1px solid #1e3a5f;border-radius:6px;'
                     f'padding:8px 14px;margin-bottom:6px;font-size:0.85rem;">'
-                    f'<b style="color:#fff;">{_ob.game or "—"}</b>'
+                    f'<b style="color:#fff;">{_ob_game}</b>'
                     f'<span style="color:#90a4ae;font-size:0.8rem;margin-left:8px;">{_ob_time_str}</span><br>'
                     f'<span style="color:#64b5f6;">{_ob_side}</span> &nbsp;·&nbsp; '
                     f'<span style="color:#fff;">{_ob_odds}</span> &nbsp;·&nbsp; '
