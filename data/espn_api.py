@@ -134,6 +134,9 @@ class ESPNClient:
     # ── Team ID lookup ─────────────────────────────────────────────────────────
 
     def _fetch_teams(self, sport: str) -> dict[str, int]:
+        if sport.upper() not in SPORT_MAP:
+            return {}
+
         cache_key = f"espn_teams_{sport}"
         cached = cache_load(cache_key)
         if cached:

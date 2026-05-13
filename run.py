@@ -35,7 +35,7 @@ logger = logging.getLogger("run")
 
 import config
 from data.odds_api import OddsAPIClient, OddsGame
-from data.espn_api import ESPNClient
+from data.espn_api import ESPNClient, SPORT_MAP as _ESPN_SPORT_MAP
 from data.daily_cache import bust_all
 from models.elo_model import EloModel
 from models.poisson_model import PoissonModel
@@ -160,16 +160,17 @@ def analyse_game(
     espn_home_prob = prediction.home_win_prob
     espn_away_prob = prediction.away_win_prob
 
-    # ── Blend: market consensus (65%) + ESPN model (35%) ──────────────────────
-    # When enough books have odds, the no-vig consensus is more accurate than
-    # our ESPN model alone. We blend rather than replace to retain ESPN's form /
-    # rest / H2H signals that pure odds markets sometimes misprice early.
+    # ── Blend: market consensus + ESPN model ──────────────────────────────────
+    # For ESPN sports: 65% consensus + 35% ESPN form/H2H model.
+    # For non-ESPN sports (soccer, MMA, etc.): 100% consensus — no ESPN data.
     cons_home = game.consensus_probs.get("home")
     cons_away = game.consensus_probs.get("away")
     n_books   = game.n_books
+    cold_espn = matchup_data.data_quality == "cold"
 
     if cons_home and n_books >= config.MIN_BOOKS_FOR_CONSENSUS:
-        home_prob = 0.65 * cons_home + 0.35 * espn_home_prob
+        weight = 0.0 if cold_espn else 0.35
+        home_prob = (1 - weight) * cons_home + weight * espn_home_prob
         away_prob = 1.0 - home_prob
     else:
         home_prob = espn_home_prob
@@ -328,19 +329,20 @@ def run_pipeline(
 
             poisson = PoissonModel()
 
-            # Try to seed Poisson from ESPN scoring averages
+            # Try to seed Poisson from ESPN scoring averages (ESPN sports only)
             ppg_map: dict[str, dict] = {}
-            for game in games:
-                for team in (game.home_team, game.away_team):
-                    if team not in ppg_map:
-                        form = espn.get_team_form(label, team)
-                        if form.ppg > 0:
-                            ppg_map[team] = {"pts_per_game": form.ppg}
-            if ppg_map:
-                try:
-                    poisson.fit_from_averages(ppg_map)
-                except Exception as exc:
-                    logger.warning("Poisson fit failed for %s: %s", label, exc)
+            if label in _ESPN_SPORT_MAP:
+                for game in games:
+                    for team in (game.home_team, game.away_team):
+                        if team not in ppg_map:
+                            form = espn.get_team_form(label, team)
+                            if form.ppg > 0:
+                                ppg_map[team] = {"pts_per_game": form.ppg}
+                if ppg_map:
+                    try:
+                        poisson.fit_from_averages(ppg_map)
+                    except Exception as exc:
+                        logger.warning("Poisson fit failed for %s: %s", label, exc)
 
             analyzer = MatchupAnalyzer(elo_model=elo, trained_bundle=bundle)
 
