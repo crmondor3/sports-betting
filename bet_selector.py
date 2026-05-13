@@ -95,6 +95,10 @@ class BetSelector:
         For each upcoming game in *odds_games*, compute features, run the ML model,
         and return all bets that exceed the edge threshold.
 
+        When no trained model exists for a market, falls back to consensus-only mode:
+        uses the multi-book no-vig consensus probability as the model probability.
+        This allows EV analysis for any sport with DraftKings odds.
+
         Bets are sorted by EV descending.
         """
         from feature_engineer import FeatureEngineer
@@ -103,38 +107,50 @@ class BetSelector:
         fe      = FeatureEngineer(sport=self.sport)
         trainer = ModelTrainer(sport=self.sport)
 
-        if not trainer.is_trained("h2h"):
-            logger.warning("No trained h2h model for %s. Run main.py --train first.", self.sport)
+        has_h2h_model     = trainer.is_trained("h2h")
+        has_spreads_model = trainer.is_trained("spreads")
+        has_totals_model  = trainer.is_trained("totals")
+
+        if not has_h2h_model:
+            logger.info(
+                "%s: no trained model — using consensus-only mode (multi-book no-vig edge).",
+                self.sport,
+            )
 
         bets: list[ValueBet] = []
 
         for game in odds_games:
-            game_id  = game.game_id
-            home     = game.home_team
-            away     = game.away_team
             game_str = getattr(game, "commence_time", datetime.utcnow()).isoformat()
 
-            # Build feature row for this game
-            snap_dict = self._build_snap_dict(game)
-            features  = fe.build_prediction_row(
-                home=home,
-                away=away,
-                historical_games=historical_games,
-                game_id=game_id,
-                odds_snapshot=snap_dict,
-            )
+            if has_h2h_model or has_spreads_model or has_totals_model:
+                snap_dict = self._build_snap_dict(game)
+                features  = fe.build_prediction_row(
+                    home=game.home_team,
+                    away=game.away_team,
+                    historical_games=historical_games,
+                    game_id=game.game_id,
+                    odds_snapshot=snap_dict,
+                )
+            else:
+                features = {}
 
             # ── H2H (moneyline) ────────────────────────────────────────────
-            if "h2h" in self.markets and trainer.is_trained("h2h"):
-                bets += self._eval_h2h(trainer, features, game, game_str)
+            if "h2h" in self.markets:
+                if has_h2h_model:
+                    bets += self._eval_h2h(trainer, features, game, game_str)
+                else:
+                    bets += self._eval_h2h_consensus(game, game_str)
 
             # ── Spreads ────────────────────────────────────────────────────
-            if "spreads" in self.markets and trainer.is_trained("spreads"):
+            if "spreads" in self.markets and has_spreads_model:
                 bets += self._eval_spreads(trainer, features, game, game_str)
 
             # ── Totals ─────────────────────────────────────────────────────
-            if "totals" in self.markets and trainer.is_trained("totals"):
-                bets += self._eval_totals(trainer, features, game, game_str)
+            if "totals" in self.markets:
+                if has_totals_model:
+                    bets += self._eval_totals(trainer, features, game, game_str)
+                else:
+                    bets += self._eval_totals_consensus(game, game_str)
 
         bets.sort(key=lambda b: b.ev, reverse=True)
         return bets
@@ -262,6 +278,86 @@ class BetSelector:
             kf    = _kelly(model_p, dk_odds, self.kelly_fraction, _MAX_BET_PCT)
             stake = round(self.bankroll * kf, 2)
 
+            bets.append(ValueBet(
+                sport=self.sport, game_id=game.game_id,
+                home_team=game.home_team, away_team=game.away_team,
+                market="totals", side=side, dk_odds=dk_odds, dk_line=total_pt,
+                model_prob=round(model_p, 4), dk_implied=round(dk_impl, 4),
+                edge_pct=round(edge * 100, 2), ev=round(ev * 100, 2),
+                kelly_frac=round(kf * 100, 2), kelly_stake=stake,
+                confidence=conf, game_time=game_str,
+            ))
+        return bets
+
+    # ── Consensus-only evaluators (no ML model required) ─────────────────────
+
+    def _eval_h2h_consensus(self, game: Any, game_str: str) -> list[ValueBet]:
+        """Use multi-book consensus no-vig prob to find edge against DraftKings h2h line."""
+        import config
+        home_prob = game.consensus_probs.get("home")
+        away_prob = game.consensus_probs.get("away")
+        if not home_prob or game.n_books < config.MIN_BOOKS_FOR_CONSENSUS:
+            return []
+
+        home_odds = game.get_line("h2h", game.home_team)
+        away_odds = game.get_line("h2h", game.away_team)
+        if not (home_odds and away_odds):
+            return []
+
+        dk_home_impl, dk_away_impl = _no_vig(home_odds, away_odds)
+        # Confidence scales with number of consensus books (max ~6 books → 90)
+        conf = min(90, game.n_books * 15)
+
+        bets: list[ValueBet] = []
+        for side, model_p, dk_impl, dk_odds in [
+            ("home", home_prob, dk_home_impl, home_odds),
+            ("away", away_prob, dk_away_impl, away_odds),
+        ]:
+            edge = model_p - dk_impl
+            if edge < self.min_edge:
+                continue
+            ev    = _ev(model_p, dk_odds)
+            kf    = _kelly(model_p, dk_odds, self.kelly_fraction, _MAX_BET_PCT)
+            stake = round(self.bankroll * kf, 2)
+            bets.append(ValueBet(
+                sport=self.sport, game_id=game.game_id,
+                home_team=game.home_team, away_team=game.away_team,
+                market="h2h", side=side, dk_odds=dk_odds, dk_line=None,
+                model_prob=round(model_p, 4), dk_implied=round(dk_impl, 4),
+                edge_pct=round(edge * 100, 2), ev=round(ev * 100, 2),
+                kelly_frac=round(kf * 100, 2), kelly_stake=stake,
+                confidence=conf, game_time=game_str,
+            ))
+        return bets
+
+    def _eval_totals_consensus(self, game: Any, game_str: str) -> list[ValueBet]:
+        """Use multi-book consensus no-vig prob to find edge against DraftKings totals line."""
+        import config
+        over_prob  = game.consensus_probs.get("over")
+        under_prob = game.consensus_probs.get("under")
+        if not over_prob or game.n_books < config.MIN_BOOKS_FOR_CONSENSUS:
+            return []
+
+        total_pt   = game.get_total_line()
+        over_odds  = game.get_line("totals", "Over")
+        under_odds = game.get_line("totals", "Under")
+        if not (total_pt and over_odds and under_odds):
+            return []
+
+        dk_over_impl, dk_under_impl = _no_vig(over_odds, under_odds)
+        conf = min(90, game.n_books * 15)
+
+        bets: list[ValueBet] = []
+        for side, model_p, dk_impl, dk_odds in [
+            ("over",  over_prob,  dk_over_impl,  over_odds),
+            ("under", under_prob, dk_under_impl, under_odds),
+        ]:
+            edge = model_p - dk_impl
+            if edge < self.min_edge:
+                continue
+            ev    = _ev(model_p, dk_odds)
+            kf    = _kelly(model_p, dk_odds, self.kelly_fraction, _MAX_BET_PCT)
+            stake = round(self.bankroll * kf, 2)
             bets.append(ValueBet(
                 sport=self.sport, game_id=game.game_id,
                 home_team=game.home_team, away_team=game.away_team,

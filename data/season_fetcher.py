@@ -98,7 +98,12 @@ def fetch_all_historical_games(
     Collect all unique completed games for a sport across the past N seasons.
     Deduplicates by (date-prefix, home, away).
     Returns games sorted chronologically oldest → newest.
+    Returns [] for sports not covered by ESPN (triggers consensus-only mode).
     """
+    if sport.upper() not in SPORT_MAP:
+        logger.info("%s has no ESPN historical data — consensus-only mode will be used.", sport)
+        return []
+
     agg_cache_key = f"hist_all_{sport}_{years_back}y"
     cached = cache_load(agg_cache_key)
     if cached is not None:

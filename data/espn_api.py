@@ -21,11 +21,13 @@ logger = logging.getLogger(__name__)
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
 SPORT_MAP: dict[str, tuple[str, str]] = {
-    "NBA": ("basketball", "nba"),
-    "MLB": ("baseball", "mlb"),
-    "NHL": ("hockey", "nhl"),
-    "NFL": ("football", "nfl"),
-    "WNBA": ("basketball", "wnba"),
+    "NBA":   ("basketball", "nba"),
+    "MLB":   ("baseball", "mlb"),
+    "NHL":   ("hockey", "nhl"),
+    "NFL":   ("football", "nfl"),
+    "WNBA":  ("basketball", "wnba"),
+    "NCAAF": ("football", "college-football"),
+    "NCAAB": ("basketball", "mens-college-basketball"),
 }
 
 

@@ -269,9 +269,16 @@ with st.sidebar:
     st.divider()
     st.markdown("### Filters")
 
-    _sport_opts = ["All", "NBA", "MLB", "NHL", "NFL", "WNBA"]
+    # Build ordered sport list: "All" first, then grouped by category
+    _sport_opts = ["All"] + [
+        s for cat in config.SPORT_CATEGORIES.values() for s in cat
+    ]
     _sport_idx  = _sport_opts.index(st.session_state["sport"]) if st.session_state["sport"] in _sport_opts else 0
-    st.session_state["sport"] = st.selectbox("Sport", _sport_opts, index=_sport_idx)
+    st.session_state["sport"] = st.selectbox(
+        "Sport", _sport_opts, index=_sport_idx,
+        help="ESPN sports (NFL/NCAAF/NBA/WNBA/NCAAB/MLB/NHL) use ML models. "
+             "Others use multi-book consensus edge detection.",
+    )
 
     st.session_state["ev_min"] = st.slider(
         "Min EV %", 0.5, 25.0,
@@ -362,7 +369,7 @@ with st.sidebar:
 
     from models.trainer import load as _load_bundle
     _any_trained = False
-    for _sl in config.SUPPORTED_SPORTS:
+    for _sl in sorted(config.ESPN_SPORTS):
         _b = _load_bundle(_sl)
         if _b:
             _any_trained = True
@@ -373,6 +380,7 @@ with st.sidebar:
             )
     if not _any_trained:
         st.warning("No trained model — click Train to build it.")
+    st.caption("Non-ESPN sports (soccer, MMA, etc.) use consensus-only mode — no training needed.")
 
     if st.button("Train Model (3 seasons)", use_container_width=True):
         from models.trainer import train_all as _train_all

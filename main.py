@@ -44,12 +44,17 @@ logger = logging.getLogger("main_ml")
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
+    sport_list = ", ".join(sorted(config.SUPPORTED_SPORTS))
     p = argparse.ArgumentParser(
         prog="main.py",
         description="ML sports betting model — DraftKings value bet finder",
     )
     p.add_argument("--sport", default="NFL",
-                   help="Sport to analyse (NFL, NBA, MLB, NHL, WNBA). Default: NFL")
+                   help=f"Sport label to analyse. Default: NFL. Available: {sport_list}")
+    p.add_argument("--sport-key", metavar="ODDS_API_KEY",
+                   help="Raw Odds API sport key (e.g. tennis_atp_french_open). Overrides --sport.")
+    p.add_argument("--list-sports", action="store_true",
+                   help="List all supported sports grouped by category and exit")
     p.add_argument("--bankroll", type=float, default=1000.0,
                    help="Current bankroll in dollars. Default: 1000")
     p.add_argument("--kelly-fraction", type=float, default=0.25,
@@ -62,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--date",
                    help="Target date YYYY-MM-DD. Default: today's upcoming games")
     p.add_argument("--train", action="store_true",
-                   help="Force re-train ML models before generating picks")
+                   help="Force re-train ML models before generating picks (ESPN sports only)")
     p.add_argument("--backtest", action="store_true",
                    help="Run historical backtest instead of live picks")
     p.add_argument("--seasons", type=int, default=3,
@@ -74,6 +79,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--refresh", action="store_true",
                    help="Force-refresh today's odds cache")
     return p
+
+
+def _print_sports_list() -> None:
+    print("\nSupported DraftKings sports:\n")
+    for category, sports in config.SPORT_CATEGORIES.items():
+        print(f"  {category}:")
+        for s in sports:
+            mode = "ML + consensus" if s in config.ESPN_SPORTS else "consensus-only"
+            key  = config.SUPPORTED_SPORTS[s]
+            print(f"    {s:<12}  {mode:<18}  ({key})")
+    print()
+    print("  consensus-only = multi-book no-vig edge detection (no historical training data)")
+    print("  ML + consensus = XGBoost/LightGBM trained on ESPN game history + consensus\n")
 
 
 # ── Pipeline steps ────────────────────────────────────────────────────────────
@@ -142,13 +160,15 @@ def step_picks(
     markets: list[str],
     top_n: int,
     refresh: bool,
+    sport_key: str | None = None,
 ) -> None:
     """Fetch live odds, generate picks, print and save."""
     import config
     from data.odds_api import OddsAPIClient
     from bet_selector import BetSelector
 
-    sport_key = config.SUPPORTED_SPORTS.get(sport.upper())
+    if not sport_key:
+        sport_key = config.SUPPORTED_SPORTS.get(sport.upper())
     if not sport_key:
         logger.error("Unknown sport '%s'", sport)
         return
@@ -215,35 +235,64 @@ def main() -> None:
     parser = build_parser()
     args   = parser.parse_args()
 
-    sport         = args.sport.upper()
-    markets       = args.market
-    use_optuna    = not args.no_optuna
+    if args.list_sports:
+        _print_sports_list()
+        return
+
+    # Resolve sport label vs raw sport key
+    if args.sport_key:
+        sport_key = args.sport_key
+        sport     = sport_key.upper().replace("_", " ")
+        # Reverse-lookup label if key is in our dict
+        for label, key in config.SUPPORTED_SPORTS.items():
+            if key == sport_key:
+                sport = label
+                break
+    else:
+        sport = args.sport.upper()
+        sport_key = config.SUPPORTED_SPORTS.get(sport)
+        if not sport_key:
+            logger.error(
+                "Unknown sport '%s'. Run with --list-sports to see all options.", sport
+            )
+            sys.exit(1)
+
+    markets    = args.market
+    use_optuna = not args.no_optuna
+    has_espn   = sport in config.ESPN_SPORTS
 
     logger.info(
-        "Starting ML pipeline — sport=%s markets=%s bankroll=%.0f kelly=%.2f min_edge=%.1f%%",
-        sport, markets, args.bankroll, args.kelly_fraction, args.min_edge * 100,
+        "Starting ML pipeline — sport=%s key=%s markets=%s bankroll=%.0f kelly=%.2f "
+        "min_edge=%.1f%% mode=%s",
+        sport, sport_key, markets, args.bankroll, args.kelly_fraction,
+        args.min_edge * 100, "ML+consensus" if has_espn else "consensus-only",
     )
 
-    # 1. Collect / refresh data
+    # 1. Collect historical data (ESPN sports only; others return [] immediately)
     games = step_collect(sport, refresh=args.refresh)
-    if not games:
-        logger.error("No historical game data available. Exiting.")
-        sys.exit(1)
 
-    # 2. Optionally train (or check if models need training)
-    from model_trainer import ModelTrainer
-    trainer = ModelTrainer(sport=sport)
-    needs_train = args.train or not trainer.is_trained("h2h")
-    if needs_train:
-        step_train(sport, games, markets, use_optuna=use_optuna)
+    # 2. Train ML models if we have ESPN data
+    if has_espn and games:
+        from model_trainer import ModelTrainer
+        trainer    = ModelTrainer(sport=sport)
+        needs_train = args.train or not trainer.is_trained("h2h")
+        if needs_train:
+            step_train(sport, games, markets, use_optuna=use_optuna)
+    elif args.train:
+        logger.warning(
+            "%s is consensus-only (no ESPN data) — --train flag has no effect.", sport
+        )
 
     # 3. Backtest OR live picks
     if args.backtest:
+        if not games:
+            logger.error("Backtest requires historical game data. Only ESPN sports support --backtest.")
+            sys.exit(1)
         step_backtest(sport, games, args.bankroll, args.kelly_fraction,
                       args.min_edge, markets, use_optuna)
     else:
         step_picks(sport, games, args.bankroll, args.kelly_fraction,
-                   args.min_edge, markets, args.top_n, args.refresh)
+                   args.min_edge, markets, args.top_n, args.refresh, sport_key)
 
 
 if __name__ == "__main__":

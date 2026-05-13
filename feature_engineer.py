@@ -24,10 +24,33 @@ logger = logging.getLogger(__name__)
 
 # ── Sport-specific constants ───────────────────────────────────────────────────
 
-_SPORT_ELO_K  = {"NFL": 28, "NBA": 20, "MLB": 10, "NHL": 16, "WNBA": 20}
-_SPORT_ELO_HA = {"NFL": 70, "NBA": 35, "MLB": 18, "NHL": 28, "WNBA": 22}
+_SPORT_ELO_K = {
+    "NFL": 28, "NBA": 20, "MLB": 10, "NHL": 16, "WNBA": 20,
+    "NCAAF": 28, "NCAAB": 20,
+    # Soccer leagues: lower K (many games, smaller elo swings per match)
+    "MLS": 16, "EPL": 16, "LALIGA": 16, "BUNDESLIGA": 16,
+    "SERIEA": 16, "LIGUE1": 16, "UCL": 16, "UEL": 16, "LIGAMX": 16,
+    "MMA": 24, "BOXING": 20,
+}
+_SPORT_ELO_HA = {
+    "NFL": 70, "NBA": 35, "MLB": 18, "NHL": 28, "WNBA": 22,
+    # College sports have outsized home advantage
+    "NCAAF": 100, "NCAAB": 60,
+    # Soccer: moderate home advantage (~55% win rate at home historically)
+    "MLS": 50, "EPL": 45, "LALIGA": 45, "BUNDESLIGA": 45,
+    "SERIEA": 45, "LIGUE1": 45, "UCL": 40, "UEL": 40, "LIGAMX": 50,
+    # Combat sports: neutral venue (no home team), so 0
+    "MMA": 0, "BOXING": 0,
+}
 # Pythagorean exponent per sport (Morey's formula for NBA: 13.91, NFL: 2.37, etc.)
-_PYTHAG_EXP   = {"NFL": 2.37, "NBA": 13.91, "MLB": 1.83, "NHL": 2.15, "WNBA": 11.5}
+_PYTHAG_EXP = {
+    "NFL": 2.37, "NBA": 13.91, "MLB": 1.83, "NHL": 2.15, "WNBA": 11.5,
+    "NCAAF": 2.37, "NCAAB": 12.0,
+    # Soccer: low-scoring sport, exponent close to baseball
+    "MLS": 1.83, "EPL": 1.83, "LALIGA": 1.83, "BUNDESLIGA": 1.83,
+    "SERIEA": 1.83, "LIGUE1": 1.83, "UCL": 1.83, "UEL": 1.83, "LIGAMX": 1.83,
+    "MMA": 2.0, "BOXING": 2.0,
+}
 
 FEATURE_NAMES: list[str] = [
     # Elo

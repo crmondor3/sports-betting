@@ -38,7 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger("auto_loop")
 
 _CYCLE_HOURS   = 24
-_ALL_SPORTS    = list(config.SUPPORTED_SPORTS.keys())  # NFL, NBA, MLB, NHL, WNBA
+_ALL_SPORTS    = list(config.SUPPORTED_SPORTS.keys())
 _DEFAULT_MARKETS = ["h2h", "spreads", "totals"]
 
 
@@ -62,12 +62,13 @@ def run_sport(
     from bet_selector import BetSelector
 
     sport_key = config.SUPPORTED_SPORTS[sport]
-    logger.info("--- %s cycle start ---", sport)
+    has_espn  = sport in config.ESPN_SPORTS
+    logger.info("--- %s cycle start (mode=%s) ---", sport, "ML+consensus" if has_espn else "consensus-only")
 
-    # 1. Fetch historical training data
+    # 1. Fetch historical training data (ESPN sports only; others return [] immediately)
     dc = DataCollector()
     games = dc.fetch_historical_games(sport)
-    if not games:
+    if not games and has_espn:
         logger.warning("%s: no historical game data, skipping.", sport)
         return False
 
@@ -77,10 +78,11 @@ def run_sport(
     except Exception as exc:
         logger.debug("%s: odds snapshot skipped (%s)", sport, exc)
 
-    # 3. Self-learning: settle → evaluate → adapt → maybe retrain
-    learner = SelfLearner(sport=sport)
-    result  = learner.run_cycle(games, markets=markets, force_retrain=force_retrain)
-    learner.print_summary(result)
+    # 3. Self-learning: settle → evaluate → adapt → maybe retrain (ESPN sports only)
+    if has_espn and games:
+        learner = SelfLearner(sport=sport)
+        result  = learner.run_cycle(games, markets=markets, force_retrain=force_retrain)
+        learner.print_summary(result)
 
     # 4. Load adapted params for this sport
     tracker    = OutcomeTracker()
@@ -234,7 +236,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--sport", metavar="SPORT",
-        help="Single sport to target (NFL/NBA/MLB/NHL/WNBA). Default: all sports",
+        help=f"Single sport to target. Default: all sports. Options: {', '.join(sorted(_ALL_SPORTS))}",
     )
     p.add_argument("--bankroll", type=float, default=1000.0)
     p.add_argument("--top-n",   type=int,   default=5)

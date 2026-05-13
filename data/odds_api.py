@@ -252,6 +252,14 @@ class OddsAPIClient:
                 result[label] = []
         return result
 
+    def get_active_sports(self) -> list[dict]:
+        """
+        Fetch all sports currently active on The Odds API (including DraftKings).
+        Returns list of dicts with keys: key, group, title, description, active, has_outrights.
+        Results are not cached — call sparingly.
+        """
+        return self._get("/sports", {"all": "false"})
+
     def get_scores(self, sport_key: str, days_from: int = 2) -> list[dict]:
         """
         Fetch completed game scores for the past `days_from` days.

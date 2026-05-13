@@ -59,11 +59,46 @@ CONSENSUS_BOOKS = "draftkings,fanduel,betmgm,caesars,betrivers,williamhill_us"
 MIN_BOOKS_FOR_CONSENSUS = 3
 
 SUPPORTED_SPORTS = {
-    "NFL": "americanfootball_nfl",
-    "NBA": "basketball_nba",
-    "MLB": "baseball_mlb",
-    "NHL": "icehockey_nhl",
-    "WNBA": "basketball_wnba",
+    # ── American Football ────────────────────────────────────────────────────
+    "NFL":        "americanfootball_nfl",
+    "NCAAF":      "americanfootball_ncaaf",
+    # ── Basketball ──────────────────────────────────────────────────────────
+    "NBA":        "basketball_nba",
+    "WNBA":       "basketball_wnba",
+    "NCAAB":      "basketball_ncaab",
+    # ── Baseball ────────────────────────────────────────────────────────────
+    "MLB":        "baseball_mlb",
+    # ── Ice Hockey ──────────────────────────────────────────────────────────
+    "NHL":        "icehockey_nhl",
+    # ── Soccer ──────────────────────────────────────────────────────────────
+    "MLS":        "soccer_usa_mls",
+    "EPL":        "soccer_epl",
+    "LALIGA":     "soccer_spain_la_liga",
+    "BUNDESLIGA": "soccer_germany_bundesliga",
+    "SERIEA":     "soccer_italy_serie_a",
+    "LIGUE1":     "soccer_france_ligue_one",
+    "UCL":        "soccer_uefa_champs_league",
+    "UEL":        "soccer_uefa_europa_league",
+    "LIGAMX":     "soccer_mexico_ligamx",
+    # ── Combat Sports ───────────────────────────────────────────────────────
+    "MMA":        "mma_mixed_martial_arts",
+    "BOXING":     "boxing_boxing",
+}
+
+# Sports with ESPN data available for full ML model training.
+# All other sports use consensus-only mode (multi-book no-vig edge detection).
+ESPN_SPORTS: frozenset[str] = frozenset({
+    "NFL", "NCAAF", "NBA", "WNBA", "NCAAB", "MLB", "NHL",
+})
+
+# UI grouping for app.py and CLI --list-sports
+SPORT_CATEGORIES: dict[str, list[str]] = {
+    "American Football": ["NFL", "NCAAF"],
+    "Basketball":        ["NBA", "WNBA", "NCAAB"],
+    "Baseball":          ["MLB"],
+    "Ice Hockey":        ["NHL"],
+    "Soccer":            ["MLS", "EPL", "LALIGA", "BUNDESLIGA", "SERIEA", "LIGUE1", "UCL", "UEL", "LIGAMX"],
+    "Combat Sports":     ["MMA", "BOXING"],
 }
 
 MARKETS = ["h2h", "spreads", "totals"]
