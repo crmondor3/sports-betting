@@ -487,15 +487,25 @@ else:
             _pd["ev_pct"]      = _cev(_adj_p, _pd["dk_odds"]) * 100
             _pd["kelly_frac"]  = _kf(_adj_p, _pd["dk_odds"], _KELLY * _final_km)
 
-        # Portfolio-level exposure cap: scale all stakes so total never exceeds 25% of bankroll.
-        # Individual Kelly fracs are correct in isolation; this prevents over-exposure
-        # when many sports are active simultaneously.
-        _MAX_PORTFOLIO = 0.25
-        _port_total = sum(p.get("kelly_frac", 0) for p in _all_dicts)
-        if _port_total > _MAX_PORTFOLIO:
-            _port_scale = _MAX_PORTFOLIO / _port_total
-            for _pd in _all_dicts:
-                _pd["kelly_frac"] = round(_pd.get("kelly_frac", 0) * _port_scale, 4)
+        # Portfolio cap applied to TODAY's picks only (ET date).
+        # Tomorrow's picks show for planning but don't consume today's budget.
+        # Max 25% of the $100 stake bankroll ($25) spread across today's slate.
+        _MAX_PORTFOLIO  = 0.25
+        _cap_today_et   = datetime.now(_ET).date()
+
+        def _pick_is_today(p: dict) -> bool:
+            try:
+                ct = datetime.fromisoformat(p.get("commence_time_iso", "")).replace(tzinfo=timezone.utc)
+                return ct.astimezone(_ET).date() == _cap_today_et
+            except Exception:
+                return False
+
+        _today_picks_cap = [p for p in _all_dicts if _pick_is_today(p) and p.get("kelly_frac", 0) > 0]
+        _today_frac_sum  = sum(p["kelly_frac"] for p in _today_picks_cap)
+        if _today_frac_sum > _MAX_PORTFOLIO:
+            _cap_scale = _MAX_PORTFOLIO / _today_frac_sum
+            for _pd in _today_picks_cap:
+                _pd["kelly_frac"] = round(_pd["kelly_frac"] * _cap_scale, 4)
 
         # Auto-log picks to DB
         _n_new = _auto_log_model_picks(_all_dicts, _effective_bankroll, _KELLY)
@@ -566,8 +576,8 @@ if page == "EV Picks":
     )
 
     # KPI row
-    _active_with_stake = [p for p in _upcoming if p.get("kelly_frac", 0) > 0]
-    _total_stake       = sum(round(bankroll_val * p["kelly_frac"], 2) for p in _active_with_stake)
+    _active_with_stake = [p for p in _upcoming if _pick_is_today(p) and p.get("kelly_frac", 0) > 0]
+    _total_stake       = sum(round(_BASE_BANKROLL * p["kelly_frac"], 2) for p in _active_with_stake)
     _avg_ev            = sum(p["ev_pct"] for p in _upcoming) / len(_upcoming) if _upcoming else 0
     _avg_edge          = sum(
         (p["model_prob"] - p["implied_prob"]) * 100 for p in _upcoming
@@ -620,7 +630,7 @@ if page == "EV Picks":
                 _odds    = _p["dk_odds"]
                 _odds_s  = _odds_str(_odds)
                 _frac    = _p.get("kelly_frac", 0)
-                _stake   = round(bankroll_val * _frac, 2) if _frac > 0 else 0
+                _stake   = round(_BASE_BANKROLL * _frac, 2) if _frac > 0 else 0
                 _to_win  = round(_stake * (_american_to_decimal(_odds) - 1), 2) if _stake > 0 else 0
                 _be_rate = _be_win_rate(_odds)
                 _bteam   = _p.get("bet_team", _p["side"])
