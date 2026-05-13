@@ -484,6 +484,16 @@ else:
             _pd["ev_pct"]      = _cev(_adj_p, _pd["dk_odds"]) * 100
             _pd["kelly_frac"]  = _kf(_adj_p, _pd["dk_odds"], _KELLY * _final_km)
 
+        # Portfolio-level exposure cap: scale all stakes so total never exceeds 25% of bankroll.
+        # Individual Kelly fracs are correct in isolation; this prevents over-exposure
+        # when many sports are active simultaneously.
+        _MAX_PORTFOLIO = 0.25
+        _port_total = sum(p.get("kelly_frac", 0) for p in _all_dicts)
+        if _port_total > _MAX_PORTFOLIO:
+            _port_scale = _MAX_PORTFOLIO / _port_total
+            for _pd in _all_dicts:
+                _pd["kelly_frac"] = round(_pd.get("kelly_frac", 0) * _port_scale, 4)
+
         # Auto-log picks to DB
         _n_new = _auto_log_model_picks(_all_dicts, _effective_bankroll, _KELLY)
         if _n_new > 0:
@@ -536,9 +546,10 @@ if page == "EV Picks":
         if p["ev_pct"] >= ev_min_filter
         and odds_lo <= p["dk_odds"] <= odds_hi
     ]
+    _today_date = _now.date()
     _upcoming = sorted(
         [p for p in _qualifying if _now < _commence_dt(p) < _now + timedelta(days=2)],
-        key=lambda p: (-p["ev_pct"], _commence_dt(p)),   # highest EV first
+        key=lambda p: ((_commence_dt(p).date() - _today_date).days, -p["ev_pct"]),
     )
     _started = sorted(
         [p for p in _qualifying if _commence_dt(p) <= _now],
