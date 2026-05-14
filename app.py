@@ -222,6 +222,14 @@ def _auto_log_model_picks(picks: list[dict], bankroll: float, kelly_frac: float)
     from tracker.models import Bet as _BetModel
     from models.kelly_criterion import kelly_fraction as _kf, flat_stake
 
+    # Deduplicate to one best bet per game_id before logging.
+    _best: dict[str, dict] = {}
+    for _pick in picks:
+        _gid = _pick.get("game_id", "")
+        if _gid not in _best or _pick.get("ev_pct", 0) > _best[_gid].get("ev_pct", 0):
+            _best[_gid] = _pick
+    picks = list(_best.values())
+
     with session_scope() as s:
         existing = {
             (r.game_id, r.bet_type, r.side)
@@ -561,13 +569,19 @@ if page == "EV Picks":
         except Exception:
             return datetime.max.replace(tzinfo=timezone.utc)
 
-    # Filter by EV and odds range, then split by game time.
-    # Show ALL positive-EV picks regardless of stake — let the bettor decide.
-    _qualifying = [
+    # Filter by EV and odds range, then deduplicate to one best bet per game.
+    _qualifying_all = [
         p for p in _all_dicts
         if p["ev_pct"] >= ev_min_filter
         and odds_lo <= p["dk_odds"] <= odds_hi
     ]
+    # One bet per game_id — keep the highest-EV pick for each event.
+    _best_per_game: dict[str, dict] = {}
+    for _p in _qualifying_all:
+        _gid = _p.get("game_id", _p.get("game", ""))
+        if _gid not in _best_per_game or _p["ev_pct"] > _best_per_game[_gid]["ev_pct"]:
+            _best_per_game[_gid] = _p
+    _qualifying = list(_best_per_game.values())
     # Use ET date for "today/tomorrow" bucketing — an 8 PM ET game is midnight UTC
     # (next calendar day in UTC), so UTC date comparisons mis-bucket evening games.
     _today_et = datetime.now(_ET).date()
